@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="theme-color" content="#f6f1e7" />
+  <meta name="description" content="股票本本 · 港股美股即時報價 PWA" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" type="image/png" href="icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="icons/icon-180.png" />
+  <link rel="apple-touch-icon" sizes="192x192" href="icons/icon-192.png" />
+  <link rel="apple-touch-icon" sizes="512x512" href="icons/icon-512.png" />
+  <title>股票本本</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/opencc-js@1.0.5/dist/umd/cn2t.js" defer></script>
+  <style>
+    :root {
+      --bg: #f6f1e7;
+      --bg-elevated: rgba(255, 252, 247, 0.92);
+      --glass: rgba(255, 255, 255, 0.55);
+      --glass-border: rgba(40, 30, 20, 0.08);
+      --glass-strong: rgba(255, 255, 255, 0.78);
+      --text: #1a1520;
+      --text-secondary: #5c5348;
+      --text-tertiary: #8a8074;
+      --up: #0ea86a;
+      --down: #e63b3a;
+      --up-bg: rgba(14, 168, 106, 0.12);
+      --down-bg: rgba(230, 59, 58, 0.12);
+      --accent: #2f6fed;
+      --accent-soft: rgba(47, 111, 237, 0.12);
+      --warn: #c47b0a;
+      --shadow: 0 4px 20px rgba(60, 45, 25, 0.06);
+      --radius-pill: 999px;
+      --radius-card: 20px;
+      --nav-height: 64px;
+      --safe-top: env(safe-area-inset-top, 0px);
+      --safe-bottom: env(safe-area-inset-bottom, 0px);
+      --safe-left: env(safe-area-inset-left, 0px);
+      --safe-right: env(safe-area-inset-right, 0px);
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", "PingFang TC", "Noto Sans TC", sans-serif;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); overflow: hidden; overscroll-behavior: none; }
+    body { padding-top: var(--safe-top); padding-left: var(--safe-left); padding-right: var(--safe-right); }
+    body.modal-open { overflow: hidden; }
+    body.modal-open .page { overflow: hidden !important; }
+    body::before {
+      content: ""; position: fixed; inset: 0;
+      background:
+        radial-gradient(ellipse 80% 50% at 15% -8%, rgba(47, 111, 237, 0.10), transparent 52%),
+        radial-gradient(ellipse 55% 40% at 92% 8%, rgba(14, 168, 106, 0.08), transparent 48%),
+        radial-gradient(ellipse 50% 35% at 50% 105%, rgba(230, 59, 58, 0.05), transparent 42%);
+      pointer-events: none; z-index: 0;
+    }
+    #app { position: relative; z-index: 1; height: 100%; display: flex; flex-direction: column; }
+    .status-bar {
+      flex-shrink: 0; height: 0; overflow: hidden;
+      background: rgba(196, 123, 10, 0.12); border-bottom: 1px solid rgba(196, 123, 10, 0.25);
+      color: var(--warn); font-size: 12px; font-weight: 600; text-align: center;
+      transition: height 0.28s ease, padding 0.28s ease;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .status-bar.show { height: 32px; padding: 0 12px; }
+    .status-bar.offline { background: rgba(230, 59, 58, 0.10); border-bottom-color: rgba(230, 59, 58, 0.28); color: var(--down); }
+    .header { flex-shrink: 0; padding: 12px 20px 8px; display: flex; align-items: center; justify-content: space-between; }
+    .header h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.5px; }
+    .header-actions { display: flex; align-items: center; gap: 8px; }
+    .pill {
+      height: 40px; min-width: 40px; padding: 0 16px; border-radius: var(--radius-pill);
+      border: 1px solid var(--glass-border); background: var(--glass);
+      backdrop-filter: blur(20px) saturate(160%); -webkit-backdrop-filter: blur(20px) saturate(160%);
+      color: var(--text); font-size: 14px; font-weight: 600;
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      cursor: pointer; transition: transform 0.2s cubic-bezier(0.25, 0.8, 0.25, 1), background 0.2s;
+      user-select: none; box-shadow: var(--shadow); font-family: inherit;
+    }
+    .pill:active { transform: scale(0.94); }
+    .pill.icon-only { width: 40px; padding: 0; }
+    .pill.primary { background: var(--accent); border-color: transparent; color: #fff; box-shadow: 0 4px 14px rgba(47, 111, 237, 0.28); }
+    .pill.ghost { background: transparent; box-shadow: none; }
+    .pages { flex: 1; position: relative; overflow: hidden; }
+    .page {
+      position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden;
+      padding: 8px 16px calc(var(--nav-height) + var(--safe-bottom) + 24px);
+      -webkit-overflow-scrolling: touch; opacity: 0; transform: translateX(24px); pointer-events: none;
+      transition: opacity 0.32s cubic-bezier(0.25, 0.8, 0.25, 1), transform 0.32s cubic-bezier(0.25, 0.8, 0.25, 1);
+    }
+    .page.active { opacity: 1; transform: translateX(0); pointer-events: auto; }
+    .page.exit-left { opacity: 0; transform: translateX(-24px); }
+    .card {
+      background: var(--bg-elevated); border: 1px solid var(--glass-border); border-radius: var(--radius-card);
+      backdrop-filter: blur(24px) saturate(160%); -webkit-backdrop-filter: blur(24px) saturate(160%);
+      padding: 16px; margin-bottom: 12px; transition: transform 0.2s; cursor: pointer; box-shadow: var(--shadow);
+    }
+    .card:active { transform: scale(0.985); }
+    .card.static { cursor: default; }
+    .card.static:active { transform: none; }
+    .stock-row { display: flex; align-items: center; gap: 14px; }
+    .stock-info { flex: 1; min-width: 0; }
+    .stock-name { font-size: 16px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .stock-code { font-size: 12px; color: var(--text-secondary); margin-top: 2px; font-variant-numeric: tabular-nums; }
+    .stock-price-block { text-align: right; }
+    .stock-price { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.3px; }
+    .stock-change {
+      font-size: 13px; font-weight: 600; margin-top: 2px; font-variant-numeric: tabular-nums;
+      display: inline-flex; align-items: center; padding: 2px 8px; border-radius: var(--radius-pill);
+    }
+    .stock-change.up { color: var(--up); background: var(--up-bg); }
+    .stock-change.down { color: var(--down); background: var(--down-bg); }
+    .stock-change.flat { color: var(--text-secondary); background: rgba(0,0,0,0.04); }
+    .market-tabs { display: flex; gap: 8px; margin-bottom: 16px; overflow-x: auto; scrollbar-width: none; }
+    .market-tabs::-webkit-scrollbar { display: none; }
+    .market-tab.active { background: var(--accent-soft); border-color: rgba(47, 111, 237, 0.35); color: var(--accent); }
+    .search-box { display: flex; gap: 10px; margin-bottom: 16px; }
+    .search-input {
+      flex: 1; height: 44px; border-radius: var(--radius-pill); border: 1px solid var(--glass-border);
+      background: var(--glass-strong); color: var(--text); font-size: 16px; padding: 0 18px; outline: none; box-shadow: var(--shadow);
+    }
+    .search-input::placeholder { color: var(--text-tertiary); }
+    .search-input:focus { border-color: rgba(47, 111, 237, 0.45); }
+    .empty { text-align: center; padding: 60px 20px; color: var(--text-secondary); }
+    .empty-icon { font-size: 48px; margin-bottom: 12px; opacity: 0.45; }
+    .bottom-nav {
+      position: fixed; left: 50%; transform: translateX(-50%);
+      bottom: calc(12px + var(--safe-bottom)); width: min(360px, calc(100% - 32px)); height: var(--nav-height);
+      background: rgba(255, 252, 247, 0.94); border: 1px solid var(--glass-border); border-radius: var(--radius-pill);
+      backdrop-filter: blur(28px) saturate(180%); -webkit-backdrop-filter: blur(28px) saturate(180%);
+      display: flex; align-items: center; justify-content: space-around; padding: 0 8px; z-index: 100;
+      box-shadow: 0 8px 32px rgba(60, 45, 25, 0.12);
+    }
+    .nav-item {
+      flex: 1; height: 48px; border-radius: var(--radius-pill);
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
+      color: var(--text-tertiary); font-size: 10px; font-weight: 600; cursor: pointer;
+      background: transparent; border: none; font-family: inherit;
+    }
+    .nav-item svg { width: 22px; height: 22px; stroke-width: 1.8; }
+    .nav-item.active { color: var(--accent); background: var(--accent-soft); }
+    .toast-container {
+      position: fixed; top: calc(var(--safe-top) + 16px); left: 50%; transform: translateX(-50%);
+      z-index: 200; display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+      width: min(320px, calc(100% - 40px));
+    }
+    .toast {
+      background: rgba(255, 252, 247, 0.96); border: 1px solid var(--glass-border); border-radius: var(--radius-pill);
+      backdrop-filter: blur(24px); padding: 12px 20px; font-size: 14px; font-weight: 500; text-align: center;
+      color: var(--text); box-shadow: 0 8px 32px rgba(60, 45, 25, 0.14);
+      animation: toast-in 0.35s cubic-bezier(0.25, 0.8, 0.25, 1);
+    }
+    .toast.session { border-color: rgba(47, 111, 237, 0.25); background: rgba(47, 111, 237, 0.08); color: var(--accent); }
+    .toast.out { animation: toast-out 0.3s cubic-bezier(0.25, 0.8, 0.25, 1) forwards; }
+    @keyframes toast-in { from { opacity: 0; transform: translateY(-16px) scale(0.96); } to { opacity: 1; transform: translateY(0) scale(1); } }
+    @keyframes toast-out { from { opacity: 1; transform: translateY(0) scale(1); } to { opacity: 0; transform: translateY(-12px) scale(0.96); } }
+    .modal-overlay { position: fixed; inset: 0; background: rgba(40, 30, 20, 0.35); z-index: 150; opacity: 0; pointer-events: none; transition: opacity 0.3s; }
+    .modal-overlay.show { opacity: 1; pointer-events: auto; }
+    .modal {
+      position: fixed; left: 0; right: 0; bottom: 0; background: rgba(255, 252, 247, 0.98);
+      border: 1px solid var(--glass-border); border-bottom: none; border-radius: 28px 28px 0 0;
+      backdrop-filter: blur(32px); padding: 12px 20px calc(24px + var(--safe-bottom));
+      z-index: 160; transform: translateY(100%); transition: transform 0.38s cubic-bezier(0.25, 0.8, 0.25, 1);
+      max-height: 85vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+      box-shadow: 0 -8px 40px rgba(60, 45, 25, 0.12);
+    }
+    .modal.show { transform: translateY(0); }
+    .modal-handle { width: 36px; height: 4px; background: rgba(0,0,0,0.12); border-radius: 2px; margin: 0 auto 16px; }
+    .detail-price { font-size: 42px; font-weight: 700; letter-spacing: -1px; font-variant-numeric: tabular-nums; }
+    .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 20px; }
+    .detail-item { background: rgba(0,0,0,0.03); border-radius: 14px; padding: 12px 14px; }
+    .detail-item label { font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 4px; }
+    .detail-item span { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .modal-actions { display: flex; gap: 10px; margin-top: 20px; }
+    .modal-actions .pill { flex: 1; height: 48px; font-size: 15px; }
+    .skeleton {
+      background: linear-gradient(90deg, rgba(0,0,0,0.04) 25%, rgba(0,0,0,0.08) 50%, rgba(0,0,0,0.04) 75%);
+      background-size: 200% 100%; animation: shimmer 1.4s infinite; border-radius: 8px;
+    }
+    @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+    .refresh-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); opacity: 0; }
+    .refresh-dot.pulse { opacity: 1; animation: pulse 0.8s ease; }
+    @keyframes pulse { 0%, 100% { transform: scale(1); opacity: 1; } 50% { transform: scale(1.4); opacity: 0.6; } }
+    .section-title { font-size: 13px; font-weight: 600; color: var(--text-secondary); margin: 8px 4px 12px; }
+    .presets { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+    .preset { height: 36px; padding: 0 14px; font-size: 13px; }
+    .fail-text { color: var(--text-tertiary); font-size: 14px; }
+    .auth-form { display: flex; flex-direction: column; gap: 10px; }
+    .auth-form input {
+      height: 44px; border-radius: 14px; border: 1px solid var(--glass-border);
+      background: var(--glass-strong); color: var(--text); font-size: 15px; padding: 0 14px; outline: none; font-family: inherit;
+    }
+    .auth-row { display: flex; gap: 8px; }
+    .auth-row .pill { flex: 1; }
+    .user-badge { font-size: 13px; color: var(--text-secondary); margin-bottom: 8px; word-break: break-all; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div class="status-bar" id="status-bar" role="status" aria-live="polite"></div>
+    <header class="header">
+      <h1 id="page-title">自選</h1>
+      <div class="header-actions">
+        <div class="refresh-dot" id="refresh-dot" aria-hidden="true"></div>
+        <button class="pill icon-only" id="btn-refresh" aria-label="重新整理">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></svg>
+        </button>
+      </div>
+    </header>
+    <div class="pages">
+      <section class="page active" id="page-watchlist" data-title="自選"><div id="watchlist-content"></div></section>
+      <section class="page" id="page-markets" data-title="市場">
+        <div class="market-tabs" role="tablist">
+          <button class="pill market-tab active" data-market="hk">港股</button>
+          <button class="pill market-tab" data-market="us">美股</button>
+        </div>
+        <div class="section-title">熱門標的</div>
+        <div id="markets-content"></div>
+      </section>
+      <section class="page" id="page-search" data-title="搜尋">
+        <div class="search-box">
+          <input class="search-input" id="search-input" type="text" placeholder="輸入代碼或名稱，如 00700、騰訊、AAPL" autocomplete="off" spellcheck="false" />
+          <button class="pill primary" id="btn-search">查詢</button>
+        </div>
+        <div class="section-title">搜尋結果</div>
+        <div id="search-result"></div>
+        <div class="section-title">快速加入</div>
+        <div class="presets" id="presets"></div>
+      </section>
+      <section class="page" id="page-settings" data-title="設定">
+        <div class="card static">
+          <div style="font-weight:600;margin-bottom:8px">帳號同步（Supabase）</div>
+          <div id="auth-panel"></div>
+        </div>
+        <div class="card static">
+          <div style="font-weight:600;margin-bottom:8px">資料來源</div>
+          <div style="font-size:14px;color:var(--text-secondary);line-height:1.5">騰訊財經公開行情（script 注入 · 避開 CORS）<br />港股即時 · 美股延遲約 15 分鐘</div>
+        </div>
+        <div class="card static">
+          <div style="font-weight:600;margin-bottom:8px">重新整理間隔</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="pill interval-btn" data-ms="3000">3 秒</button>
+            <button class="pill interval-btn active" data-ms="5000">5 秒</button>
+            <button class="pill interval-btn" data-ms="10000">10 秒</button>
+            <button class="pill interval-btn" data-ms="30000">30 秒</button>
+          </div>
+        </div>
+        <div class="card static">
+          <div style="font-weight:600;margin-bottom:12px">自選清單</div>
+          <button class="pill" id="btn-clear" style="width:100%">清空全部自選</button>
+        </div>
+        <div class="card static" style="text-align:center;color:var(--text-tertiary);font-size:13px">Quote PWA · 支援 Notch / Dynamic Island</div>
+      </section>
+    </div>
+    <nav class="bottom-nav" role="navigation">
+      <button class="nav-item active" data-page="watchlist"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg><span>自選</span></button>
+      <button class="nav-item" data-page="markets"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><polyline points="22 7 13.5 15.5 8.5 10.5 2 17"/><polyline points="16 7 22 7 22 13"/></svg><span>市場</span></button>
+      <button class="nav-item" data-page="search"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg><span>搜尋</span></button>
+      <button class="nav-item" data-page="settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span>設定</span></button>
+    </nav>
+  </div>
+  <div class="toast-container" id="toasts" aria-live="polite"></div>
+  <div class="modal-overlay" id="modal-overlay"></div>
+  <div class="modal" id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-handle"></div>
+    <div id="modal-content"></div>
+  </div>
+  <script src="app.js" defer></script>
+</body>
+</html>
