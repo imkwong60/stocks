@@ -46,10 +46,14 @@
       *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
     }
     * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
-    html, body { height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); overflow: hidden; overscroll-behavior: none; }
+    html, body {
+      height: 100%; background: var(--bg); color: var(--text); font-family: var(--font);
+      overflow: hidden; overscroll-behavior: none; touch-action: manipulation;
+      position: fixed; width: 100%; inset: 0;
+    }
     body { padding-top: var(--safe-top); padding-left: var(--safe-left); padding-right: var(--safe-right); }
     body.modal-open { overflow: hidden; }
-    body.modal-open .page { overflow: hidden !important; }
+    body.modal-open .page { overflow: hidden !important; touch-action: none; }
     body::before {
       content: ""; position: fixed; inset: 0;
       background:
@@ -58,7 +62,10 @@
         radial-gradient(ellipse 50% 35% at 50% 105%, rgba(230, 59, 58, 0.05), transparent 42%);
       pointer-events: none; z-index: 0;
     }
-    #app { position: relative; z-index: 1; height: 100%; display: flex; flex-direction: column; }
+    #app {
+      position: relative; z-index: 1; height: 100%; display: flex; flex-direction: column;
+      overflow: hidden; overscroll-behavior: none; touch-action: none;
+    }
     .status-bar {
       flex-shrink: 0; height: 0; overflow: hidden;
       background: rgba(196, 123, 10, 0.12); border-bottom: 1px solid rgba(196, 123, 10, 0.25);
@@ -68,7 +75,10 @@
     }
     .status-bar.show { height: 32px; padding: 0 12px; }
     .status-bar.offline { background: rgba(230, 59, 58, 0.10); border-bottom-color: rgba(230, 59, 58, 0.28); color: var(--down); }
-    .header { flex-shrink: 0; padding: 12px 20px 8px; display: flex; align-items: center; justify-content: space-between; }
+    .header {
+      flex-shrink: 0; padding: 12px 20px 8px; display: flex; align-items: center; justify-content: space-between;
+      overscroll-behavior: none; touch-action: manipulation; position: relative; z-index: 5;
+    }
     .header h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.5px; }
     .header-actions { display: flex; align-items: center; gap: 8px; }
     .pill {
@@ -84,9 +94,11 @@
     .pill.icon-only { width: 40px; padding: 0; }
     .pill.primary { background: var(--accent); border-color: transparent; color: #fff; box-shadow: 0 4px 14px rgba(47, 111, 237, 0.28); }
     .pill.ghost { background: transparent; box-shadow: none; }
-    .pages { flex: 1; position: relative; overflow: hidden; }
+    .pages { flex: 1; position: relative; overflow: hidden; overscroll-behavior: none; min-height: 0; touch-action: none; }
     .page {
       position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden;
+      overscroll-behavior-y: contain; overscroll-behavior-x: none;
+      touch-action: pan-y;
       padding: 8px 16px calc(var(--nav-height) + var(--safe-bottom) + 24px);
       -webkit-overflow-scrolling: touch; opacity: 0; transform: translateX(24px); pointer-events: none;
       transition: opacity 0.32s cubic-bezier(0.25, 0.8, 0.25, 1), transform 0.32s cubic-bezier(0.25, 0.8, 0.25, 1);
@@ -133,6 +145,7 @@
       backdrop-filter: blur(28px) saturate(180%); -webkit-backdrop-filter: blur(28px) saturate(180%);
       display: flex; align-items: center; justify-content: space-around; padding: 0 8px; z-index: 100;
       box-shadow: 0 8px 32px rgba(60, 45, 25, 0.12);
+      touch-action: manipulation; overscroll-behavior: none;
     }
     .nav-item {
       flex: 1; height: 48px; border-radius: var(--radius-pill);
