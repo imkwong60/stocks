@@ -7,6 +7,16 @@
   var INTERVAL_KEY = 'quote_interval_v1';
   var SESSION_TOAST_KEY = 'quote_session_toasts_v1';
 
+  function lsGet(k, fallback) {
+    try { var v = localStorage.getItem(k); return v == null ? fallback : v; } catch (e) { return fallback; }
+  }
+  function lsSet(k, v) {
+    try { localStorage.setItem(k, v); return true; } catch (e) { return false; }
+  }
+  function lsDel(k) {
+    try { localStorage.removeItem(k); } catch (e) {}
+  }
+
   var SUPABASE_URL = 'https://wanknivxcsrasdkkxmfr.supabase.co';
   var SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndhbmtuaXZ4Y3NyYXNka2t4bWZyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODczMzE4NjcsImV4cCI6MjEwMjkwNzg2N30.tqsFimERtYCxoh8J-8FlqxByWtX2gNnyaGo08jditrs';
 
@@ -63,22 +73,23 @@
   var watchlist = [];
   var quotes = {};
   var currentPage = 'watchlist';
+  var pageVersion = 0;
   var currentMarket = 'hk';
-  var pollInterval = parseInt(localStorage.getItem(INTERVAL_KEY) || '5000', 10);
+  var ALLOWED_INTERVALS = [3000, 5000, 10000, 30000];
+  var pollInterval = parseInt(lsGet(INTERVAL_KEY, '5000'), 10);
+  if (ALLOWED_INTERVALS.indexOf(pollInterval) < 0) pollInterval = 5000;
   var pollTimer = null;
   var selectedKey = null;
   var inFlight = false;
   var consecutiveFails = 0;
   var isOnline = navigator.onLine;
   var hasFetchedOnce = false;
-  var currentUser = null;
-  var bootSynced = false;
   var syncTimer = null;
   var searchTimer = null;
   var searchSeq = 0;
   var searching = false;
   var sessionToastState = {};
-  try { sessionToastState = JSON.parse(localStorage.getItem(SESSION_TOAST_KEY) || '{}'); } catch (e) { sessionToastState = {}; }
+  try { sessionToastState = JSON.parse(lsGet(SESSION_TOAST_KEY, '{}') || '{}'); } catch (e) { sessionToastState = {}; }
 
   var fmtHK = null, fmtUS = null;
   try {
@@ -92,24 +103,81 @@
     return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
   function showToast(msg, duration, cls) {
-    duration = duration || 2200;
+    duration = duration || 2400;
+    var container = document.getElementById('toasts');
+    if (!container) return;
+    while (container.children.length >= 3) {
+      container.removeChild(container.firstChild);
+    }
+    var type = 'info';
+    var title = msg;
+    var sub = '';
+    if (cls === 'session') type = 'session';
+    else if (cls === 'success' || cls === 'error' || cls === 'warn') type = cls;
+    // 常見訊息自動分類
+    if (type === 'info') {
+      if (/失敗|無法|錯誤|請檢查/.test(msg)) type = 'error';
+      else if (/已|成功|完成|載入|儲存|加入|移除|更新|設為|恢復/.test(msg)) type = 'success';
+      else if (/離線|不穩|重試/.test(msg)) type = 'warn';
+    }
+    var icons = { info: 'i', success: '✓', error: '!', warn: '!', session: '◎' };
+    // 拆標題／副文：若含括號或「·」
+    var m = msg.match(/^(.*?)（(.*)）$/);
+    if (m) { title = m[1]; sub = m[2]; }
     var el = document.createElement('div');
-    el.className = 'toast' + (cls ? ' ' + cls : '');
-    el.textContent = msg;
-    document.getElementById('toasts').appendChild(el);
-    setTimeout(function () { el.classList.add('out'); setTimeout(function () { el.remove(); }, 320); }, duration);
+    el.className = 'toast ' + type;
+    el.innerHTML =
+      '<div class="toast-icon" aria-hidden="true">' + icons[type] + '</div>' +
+      '<div class="toast-body">' +
+        '<div class="toast-title"></div>' +
+        (sub ? '<div class="toast-sub"></div>' : '') +
+      '</div>';
+    el.querySelector('.toast-title').textContent = title;
+    if (sub) el.querySelector('.toast-sub').textContent = sub;
+    container.appendChild(el);
+    setTimeout(function () {
+      el.classList.add('out');
+      setTimeout(function () { if (el.parentNode) el.remove(); }, 280);
+    }, duration);
   }
+  var networkStatus = null;
+  var sessionStatusText = '';
+  var sessionStatusTone = 'closed'; // open | closed | session
+
   function setStatus(kind, text) {
+    networkStatus = kind ? { kind: kind, text: text } : null;
+    paintStatusBar();
+  }
+  function paintStatusBar() {
     var bar = document.getElementById('status-bar');
-    if (!kind) { bar.classList.remove('show', 'offline'); bar.textContent = ''; return; }
-    bar.classList.add('show');
-    bar.classList.toggle('offline', kind === 'offline');
-    bar.textContent = text;
+    bar.classList.remove('offline', 'warn', 'session', 'open', 'closed');
+    if (networkStatus) {
+      bar.classList.add('show');
+      if (networkStatus.kind === 'offline') bar.classList.add('offline');
+      else if (networkStatus.kind === 'warn') bar.classList.add('warn');
+      bar.textContent = networkStatus.text;
+      return;
+    }
+    if (sessionStatusText) {
+      bar.classList.add('show', 'session');
+      if (sessionStatusTone === 'open') bar.classList.add('open');
+      if (sessionStatusTone === 'closed') bar.classList.add('closed');
+      bar.textContent = sessionStatusText;
+      return;
+    }
+    bar.classList.remove('show');
+    bar.textContent = '';
   }
   function num(v) { var n = parseFloat(v); return isNaN(n) ? null : n; }
-  function formatPrice(n, market) {
+  function isIndexSymbol(market, symbol) {
+    if (market === 'hk') return symbol === 'HSI';
+    return symbol === 'DJI' || symbol === 'IXIC' || symbol === 'INX' || symbol === '.DJI' || symbol === '.IXIC' || symbol === '.INX';
+  }
+  function formatPrice(n, market, symbol) {
     if (n == null || isNaN(n)) return '—';
-    if (market === 'hk') return n >= 1000 ? n.toFixed(2) : n.toFixed(3);
+    if (market === 'hk') {
+      return isIndexSymbol(market, symbol) ? n.toFixed(2) : n.toFixed(3);
+    }
     return n.toFixed(2);
   }
   function formatChange(change, pct, market) {
@@ -176,14 +244,29 @@
   }
   function expectedVarName(item) { return 'v_' + toQueryCode(item); }
 
+  function normalizeWatchlist(items) {
+    if (!Array.isArray(items)) return [];
+    return items.filter(function (x) {
+      return x && x.symbol && (x.market === 'hk' || x.market === 'us');
+    }).map(function (x) {
+      var symbol = String(x.symbol);
+      if (x.market === 'hk' && /^\d+$/.test(symbol)) {
+        symbol = symbol.replace(/^0+/, '') || '0';
+        if (symbol.length > 5) return null;
+        symbol = symbol.padStart(5, '0');
+      }
+      return { key: makeKey(x.market, symbol), symbol: symbol, market: x.market };
+    }).filter(Boolean);
+  }
+
   function loadWatchlist() {
-    var raw = localStorage.getItem(STORAGE_KEY);
+    var raw = lsGet(STORAGE_KEY, null);
     // 有 v2 資料（含空陣列）= 已初始化，不可再播種
     if (raw !== null) {
-      try { watchlist = JSON.parse(raw) || []; } catch (e) { watchlist = []; }
-      localStorage.setItem(INIT_KEY, '1');
+      try { watchlist = normalizeWatchlist(JSON.parse(raw) || []); } catch (e) { watchlist = []; }
+      lsSet(INIT_KEY, '1');
     } else {
-      var old = localStorage.getItem(STORAGE_KEY_V1);
+      var old = lsGet(STORAGE_KEY_V1, null);
       if (old) {
         try {
           var arr = JSON.parse(old);
@@ -192,13 +275,13 @@
               var market = w.market || (/^\d+$/.test(w.symbol) ? 'hk' : 'us');
               return { key: makeKey(market, w.symbol), symbol: w.symbol, market: market };
             });
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(watchlist));
-            localStorage.setItem(INIT_KEY, '1');
+            lsSet(STORAGE_KEY, JSON.stringify(watchlist));
+            lsSet(INIT_KEY, '1');
             return;
           }
         } catch (e) {}
       }
-      if (!localStorage.getItem(INIT_KEY)) {
+      if (!lsGet(INIT_KEY, null)) {
         watchlist = [
           { key: 'hk:HSI', symbol: 'HSI', market: 'hk' },
           { key: 'hk:00700', symbol: '00700', market: 'hk' },
@@ -206,53 +289,63 @@
           { key: 'us:AAPL', symbol: 'AAPL', market: 'us' },
           { key: 'us:NVDA', symbol: 'NVDA', market: 'us' }
         ];
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(watchlist));
-        localStorage.setItem(INIT_KEY, '1');
+        lsSet(STORAGE_KEY, JSON.stringify(watchlist));
+        lsSet(INIT_KEY, '1');
       }
     }
     if (watchlist.length && watchlist[0] && !watchlist[0].key) {
       watchlist = watchlist.map(function (w) {
         return { key: makeKey(w.market, w.symbol), symbol: w.symbol, market: w.market };
       });
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(watchlist));
+      lsSet(STORAGE_KEY, JSON.stringify(watchlist));
     }
   }
 
   function saveWatchlist() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(watchlist));
-    localStorage.setItem(INIT_KEY, '1');
+    lsSet(STORAGE_KEY, JSON.stringify(watchlist));
+    lsSet(INIT_KEY, '1');
     scheduleSyncUp();
   }
 
+  var EMAIL_KEY = 'quote_cloud_email_v1';
+  var boundEmail = lsGet(EMAIL_KEY, '') || '';
+  var emailDraft = boundEmail;
+
   function scheduleSyncUp() {
-    if (!sb || !currentUser) return;
+    if (!sb || !boundEmail) return;
     if (syncTimer) clearTimeout(syncTimer);
     syncTimer = setTimeout(function () { syncWatchlistUp(); }, 800);
   }
 
-  function cloudRowId() {
-    if (!currentUser) return null;
-    if (currentUser.id) return 'quote_watchlist_' + currentUser.id;
-    if (currentUser.email) return 'quote_watchlist_' + String(currentUser.email).toLowerCase();
-    return null;
+  // 與其他 app 相同：id = quote_watchlist_{email}（email 接在資料鍵後面）
+  function cloudRowId(email) {
+    var e = (email != null ? email : boundEmail) || '';
+    e = String(e).trim().toLowerCase();
+    if (!e || e.indexOf('@') < 1) return null;
+    return 'quote_watchlist_' + e;
   }
 
   async function syncWatchlistUp() {
-    if (!sb || !currentUser) return;
+    if (!sb) return false;
     var id = cloudRowId();
-    if (!id) return;
+    if (!id) return false;
     try {
       var res = await sb.from('notepad_data').upsert({
         id: id,
-        data: { app: 'quote-pwa', email: currentUser.email || '', user_id: currentUser.id || '', items: watchlist },
+        data: { items: watchlist },
         updated_at: new Date().toISOString()
       }, { onConflict: 'id' });
       if (res.error) throw res.error;
-    } catch (e) { console.warn('sync up', e); }
+      return true;
+    } catch (e) {
+      console.warn('sync up', e);
+      return false;
+    }
   }
 
-  async function syncWatchlistDown() {
-    if (!sb || !currentUser) return;
+  async function syncWatchlistDown(opts) {
+    opts = opts || {};
+    if (!sb) return;
     var id = cloudRowId();
     if (!id) return;
     try {
@@ -263,160 +356,138 @@
         if (Array.isArray(res.data.data.items)) items = res.data.data.items;
         else if (Array.isArray(res.data.data)) items = res.data.data;
       }
-      if (!items && currentUser.email) {
-        var alt = await sb.from('notepad_data').select('data')
-          .eq('id', 'quote_watchlist_' + String(currentUser.email).toLowerCase()).maybeSingle();
-        if (alt.data && alt.data.data && Array.isArray(alt.data.data.items)) items = alt.data.data.items;
-      }
       if (items) {
-        watchlist = items;
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(watchlist));
-        localStorage.setItem(INIT_KEY, '1');
+        watchlist = normalizeWatchlist(items);
+        lsSet(STORAGE_KEY, JSON.stringify(watchlist));
+        lsSet(INIT_KEY, '1');
         renderWatchlist(true);
         renderPresets();
-        showToast('已從雲端同步自選');
-      } else {
-        await syncWatchlistUp();
+        if (opts.toast !== false) showToast('已載入雲端自選');
+      } else if (opts.uploadIfEmpty) {
+        var ok = await syncWatchlistUp();
+        if (opts.toast !== false) showToast(ok ? '雲端尚無資料，已上傳本機自選' : '上傳失敗（請檢查 RLS 權限）');
+      } else if (opts.toast !== false) {
+        showToast('雲端尚無此 Email 的自選');
       }
     } catch (e) {
       console.warn('sync down', e);
-      showToast('雲端同步失敗：' + (e.message || '請檢查權限'));
+      showToast('讀取失敗：' + (e.message || '請檢查權限'));
     }
-  }
-
-  function bootSync(user) {
-    if (bootSynced) return;
-    bootSynced = true;
-    currentUser = user;
-    renderAuthPanel();
-    if (user) syncWatchlistDown();
   }
 
   function renderAuthPanel() {
     var el = document.getElementById('auth-panel');
     if (!sb) {
-      el.innerHTML = '<div style="font-size:13px;color:var(--text-tertiary)">同步功能不可用（無法載入 Supabase）</div>';
-      return;
-    }
-    if (currentUser) {
-      el.innerHTML =
-        '<div class="user-badge">已登入：' + escapeHtml(currentUser.email || currentUser.id) + '</div>' +
-        '<div class="auth-row">' +
-          '<button class="pill" id="btn-sync">立即同步</button>' +
-          '<button class="pill ghost" id="btn-logout">登出</button>' +
-        '</div>' +
-        '<div style="font-size:12px;color:var(--text-tertiary);margin-top:8px;line-height:1.4">自選寫入 notepad_data · id = ' + escapeHtml(cloudRowId() || '') + '</div>';
-      document.getElementById('btn-logout').onclick = async function () {
-        await sb.auth.signOut();
-        currentUser = null;
-        bootSynced = false;
-        renderAuthPanel();
-        showToast('已登出');
-      };
-      document.getElementById('btn-sync').onclick = async function () {
-        await syncWatchlistUp();
-        await syncWatchlistDown();
-        showToast('同步完成');
-      };
+      el.innerHTML = '<div style="font-size:13px;color:var(--text-tertiary)">同步功能不可用</div>';
       return;
     }
     el.innerHTML =
       '<div class="auth-form">' +
-        '<input type="email" id="auth-email" placeholder="電子郵件" autocomplete="email" />' +
-        '<button class="pill primary" id="btn-magic" style="width:100%">傳送登入連結</button>' +
-        '<div style="font-size:12px;color:var(--text-tertiary);line-height:1.4">免密碼：輸入 Email 後到信箱點連結即可登入。</div>' +
+        '<input type="email" id="auth-email" placeholder="your@email.com" autocomplete="email" value="' + escapeHtml(emailDraft || boundEmail) + '" />' +
+        '<div class="auth-row">' +
+          '<button class="pill primary" id="btn-load">載入</button>' +
+          '<button class="pill" id="btn-save">儲存</button>' +
+        '</div>' +
+        '<div style="font-size:12px;color:var(--text-tertiary);line-height:1.4;margin-top:6px">' +
+          '與其他資料相同：id = quote_watchlist_你的email。不寄信、不登入。' +
+        '</div>' +
       '</div>';
-    document.getElementById('btn-magic').onclick = async function () {
-      var email = document.getElementById('auth-email').value.trim();
-      if (!email || email.indexOf('@') < 1) { showToast('請輸入有效 Email'); return; }
-      var btn = document.getElementById('btn-magic');
-      btn.disabled = true;
-      btn.textContent = '傳送中…';
-      try {
-        var res = await sb.auth.signInWithOtp({
-          email: email,
-          options: { emailRedirectTo: window.location.href.split('#')[0] }
-        });
-        if (res.error) throw res.error;
-        showToast('已傳送登入連結，請查收信箱', 4000);
-      } catch (e) {
-        showToast(e.message || '傳送失敗');
-      } finally {
-        btn.disabled = false;
-        btn.textContent = '傳送登入連結';
-      }
+    var emailInput = document.getElementById('auth-email');
+    emailInput.addEventListener('input', function () { emailDraft = emailInput.value; });
+    function bindEmailFromInput() {
+      var email = emailInput.value.trim().toLowerCase();
+      if (!email || email.indexOf('@') < 1) { showToast('請輸入有效 Email'); return null; }
+      boundEmail = email;
+      emailDraft = email;
+      lsSet(EMAIL_KEY, boundEmail);
+      return email;
+    }
+    document.getElementById('btn-load').onclick = async function () {
+      if (!bindEmailFromInput()) return;
+      await syncWatchlistDown({ toast: true });
+    };
+    document.getElementById('btn-save').onclick = async function () {
+      if (!bindEmailFromInput()) return;
+      var ok = await syncWatchlistUp();
+      showToast(ok ? '已儲存到雲端' : '儲存失敗（請檢查網路或 RLS 權限）');
     };
   }
 
   function fetchQuotes(items) {
     if (!items.length) return Promise.resolve({});
+    // CORS 已開放：用 fetch + GBK 解碼，避免 usBRK.B 這類變數名導致 script 語法錯誤
     var qs = items.map(toQueryCode).join(',');
-    var expected = items.map(expectedVarName);
     var reqMap = {};
-    items.forEach(function (item, i) { reqMap[expected[i]] = item; });
-
-    return new Promise(function (resolve, reject) {
-      expected.forEach(function (name) {
-        try { delete window[name]; } catch (e) { window[name] = undefined; }
-      });
-      var script = document.createElement('script');
-      script.charset = 'gbk';
-      var done = false;
-      function finish(ok) {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        var result = {};
-        expected.forEach(function (name) {
-          var val = window[name];
-          if (typeof val === 'string') {
-            var parsed = parseOneQuote(name, val, reqMap[name]);
-            if (parsed) result[parsed.key] = parsed;
-          }
-          try { delete window[name]; } catch (e) { window[name] = undefined; }
-        });
-        script.remove();
-        if (Object.keys(result).length) resolve(result);
-        else if (ok) resolve({});
-        else reject(new Error('empty'));
-      }
-      var timer = setTimeout(function () { finish(false); }, 8000);
-      script.onload = function () { finish(true); };
-      script.onerror = function () { finish(false); };
-      script.src = 'https://qt.gtimg.cn/q=' + qs + '&_=' + Date.now();
-      document.head.appendChild(script);
+    items.forEach(function (item) {
+      reqMap[expectedVarName(item)] = item;
+      // 也用請求碼索引
+      reqMap[toQueryCode(item)] = item;
     });
+    return fetch('https://qt.gtimg.cn/q=' + qs + '&_=' + Date.now(), { cache: 'no-store' })
+      .then(function (res) {
+        if (!res.ok) throw new Error('http ' + res.status);
+        return res.arrayBuffer();
+      })
+      .then(function (buf) {
+        var text;
+        try { text = new TextDecoder('gbk').decode(buf); }
+        catch (e1) {
+          try { text = new TextDecoder('gb18030').decode(buf); }
+          catch (e2) { text = new TextDecoder('utf-8').decode(buf); }
+        }
+        var result = {};
+        // 匹配 v_xxx="..."（xxx 可含點號）
+        var re = /v_([^=\s]+)="([^"]*)"/g;
+        var m;
+        while ((m = re.exec(text))) {
+          var varName = 'v_' + m[1];
+          var fieldStr = m[2];
+          var req = reqMap[varName] || reqMap[m[1]];
+          var parsed = parseOneQuote(varName, fieldStr, req);
+          if (parsed) result[parsed.key] = parsed;
+        }
+        return result;
+      });
   }
+
+  // 騰訊 qt 欄位偏移（集改格式時集中調整）
+  var FIELD = {
+    NAME: 1, SYMBOL: 2, PRICE: 3, PREV: 4, OPEN: 5, VOLUME: 6,
+    TIME: 30, CHANGE: 31, PCT: 32, HIGH: 33, LOW: 34, US_CURRENCY: 35, HK_CURRENCY: 75
+  };
 
   function parseOneQuote(varName, fieldStr, reqItem) {
     var fields = fieldStr.split('~');
-    if (fields.length < 35) return null;
+    if (fields.length < 35) {
+      try { console.warn('quote fields short', varName, fields.length); } catch (e) {}
+      return null;
+    }
     var market, symbol, name, price, prevClose, open, high, low, volume, change, changePct, currency, time;
     if (varName.indexOf('v_hk') === 0) {
       market = 'hk';
       if (reqItem && reqItem.symbol) symbol = reqItem.symbol;
       else if (varName === 'v_hkHSI') symbol = 'HSI';
       else symbol = fields[2] || varName.slice(4);
-      name = lookupName(market, symbol, fields[1]);
-      price = num(fields[3]); prevClose = num(fields[4]); open = num(fields[5]);
-      volume = num(fields[6]) || 0; change = num(fields[31]); changePct = num(fields[32]);
-      high = num(fields[33]); low = num(fields[34]); time = fields[30] || '';
-      currency = (fields.length > 75 && fields[75] && /^[A-Z]{3}$/.test(fields[75])) ? fields[75] : 'HKD';
+      name = lookupName(market, symbol, fields[FIELD.NAME]);
+      price = num(fields[FIELD.PRICE]); prevClose = num(fields[FIELD.PREV]); open = num(fields[FIELD.OPEN]);
+      volume = num(fields[FIELD.VOLUME]) || 0; change = num(fields[FIELD.CHANGE]); changePct = num(fields[FIELD.PCT]);
+      high = num(fields[FIELD.HIGH]); low = num(fields[FIELD.LOW]); time = fields[FIELD.TIME] || '';
+      currency = (fields.length > FIELD.HK_CURRENCY && fields[FIELD.HK_CURRENCY] && /^[A-Z]{3}$/.test(fields[FIELD.HK_CURRENCY])) ? fields[FIELD.HK_CURRENCY] : 'HKD';
     } else if (varName.indexOf('v_us') === 0) {
       market = 'us';
       if (reqItem && reqItem.symbol) symbol = reqItem.symbol;
       else {
-        var code = fields[2] || varName.slice(4);
+        var code = fields[FIELD.SYMBOL] || varName.slice(4);
         code = code.replace(/^\./, '');
         code = code.replace(/\.(OQ|N|PK|OB|OTC)$/i, '');
         symbol = code;
       }
-      name = lookupName(market, symbol, fields[1]);
-      price = num(fields[3]); prevClose = num(fields[4]); open = num(fields[5]);
-      volume = num(fields[6]) || 0; change = num(fields[31]); changePct = num(fields[32]);
-      high = num(fields[33]); low = num(fields[34]);
-      currency = (fields[35] && /^[A-Z]{3}$/.test(fields[35])) ? fields[35] : 'USD';
-      time = fields[30] || '';
+      name = lookupName(market, symbol, fields[FIELD.NAME]);
+      price = num(fields[FIELD.PRICE]); prevClose = num(fields[FIELD.PREV]); open = num(fields[FIELD.OPEN]);
+      volume = num(fields[FIELD.VOLUME]) || 0; change = num(fields[FIELD.CHANGE]); changePct = num(fields[FIELD.PCT]);
+      high = num(fields[FIELD.HIGH]); low = num(fields[FIELD.LOW]);
+      currency = (fields[FIELD.US_CURRENCY] && /^[A-Z]{3}$/.test(fields[FIELD.US_CURRENCY])) ? fields[FIELD.US_CURRENCY] : 'USD';
+      time = fields[FIELD.TIME] || '';
     } else return null;
     if (price == null) return null;
     return {
@@ -445,7 +516,7 @@
     return '<div class="card stock-row" data-key="' + escapeHtml(q.key) + '" tabindex="0" role="button">' +
       '<div class="stock-info"><div class="stock-name" data-field="name">' + escapeHtml(q.name) + '</div>' +
       '<div class="stock-code">' + escapeHtml(q.symbol) + ' · ' + q.market.toUpperCase() + '</div></div>' +
-      '<div class="stock-price-block"><div class="stock-price" data-field="price">' + formatPrice(q.price, q.market) + '</div>' +
+      '<div class="stock-price-block"><div class="stock-price" data-field="price">' + formatPrice(q.price, q.market, q.symbol) + '</div>' +
       '<div class="stock-change ' + ch.cls + '" data-field="change">' + ch.text + '</div></div></div>';
   }
 
@@ -458,7 +529,7 @@
       var priceEl = row.querySelector('[data-field="price"]');
       var changeEl = row.querySelector('[data-field="change"]');
       var nameEl = row.querySelector('[data-field="name"]');
-      if (!priceEl || !changeEl) return false;
+      if (!priceEl || !changeEl) continue;
       if (!q) {
         if (!priceEl.classList.contains('fail-text')) {
           priceEl.textContent = '—'; priceEl.classList.add('fail-text');
@@ -467,7 +538,7 @@
         continue;
       }
       priceEl.classList.remove('fail-text');
-      priceEl.textContent = formatPrice(q.price, q.market);
+      priceEl.textContent = formatPrice(q.price, q.market, q.symbol);
       var ch = formatChange(q.change, q.changePct, q.market);
       changeEl.textContent = ch.text;
       changeEl.className = 'stock-change ' + ch.cls;
@@ -553,13 +624,13 @@
     var priceColor = ch.cls === 'up' ? 'var(--up)' : ch.cls === 'down' ? 'var(--down)' : 'var(--text)';
     var priceEl = root.querySelector('[data-field="price"]');
     var changeEl = root.querySelector('[data-field="change"]');
-    priceEl.textContent = formatPrice(q.price, q.market);
+    priceEl.textContent = formatPrice(q.price, q.market, q.symbol);
     priceEl.style.color = priceColor;
     changeEl.textContent = ch.text;
     changeEl.className = 'stock-change ' + ch.cls;
     var map = {
-      open: formatPrice(q.open, q.market), prev: formatPrice(q.prevClose, q.market),
-      high: formatPrice(q.high, q.market), low: formatPrice(q.low, q.market),
+      open: formatPrice(q.open, q.market, q.symbol), prev: formatPrice(q.prevClose, q.market, q.symbol),
+      high: formatPrice(q.high, q.market, q.symbol), low: formatPrice(q.low, q.market, q.symbol),
       vol: formatVol(q.volume), time: q.time || '—'
     };
     Object.keys(map).forEach(function (k) {
@@ -594,13 +665,13 @@
       '<div data-field="meta" style="font-size:13px;color:var(--text-secondary);margin-top:2px">' +
         escapeHtml(q.symbol) + ' · ' + q.market.toUpperCase() + ' · ' + escapeHtml(q.currency) +
       '</div></div>' +
-      '<div class="detail-price" data-field="price" style="margin-top:12px;color:' + priceColor + '">' + formatPrice(q.price, q.market) + '</div>' +
+      '<div class="detail-price" data-field="price" style="margin-top:12px;color:' + priceColor + '">' + formatPrice(q.price, q.market, q.symbol) + '</div>' +
       '<div class="stock-change ' + ch.cls + '" data-field="change" style="margin-top:6px;display:inline-flex">' + ch.text + '</div>' +
       '<div class="detail-grid">' +
-      '<div class="detail-item"><label>今開</label><span data-field="open">' + formatPrice(q.open, q.market) + '</span></div>' +
-      '<div class="detail-item"><label>昨收</label><span data-field="prev">' + formatPrice(q.prevClose, q.market) + '</span></div>' +
-      '<div class="detail-item"><label>最高</label><span data-field="high">' + formatPrice(q.high, q.market) + '</span></div>' +
-      '<div class="detail-item"><label>最低</label><span data-field="low">' + formatPrice(q.low, q.market) + '</span></div>' +
+      '<div class="detail-item"><label>今開</label><span data-field="open">' + formatPrice(q.open, q.market, q.symbol) + '</span></div>' +
+      '<div class="detail-item"><label>昨收</label><span data-field="prev">' + formatPrice(q.prevClose, q.market, q.symbol) + '</span></div>' +
+      '<div class="detail-item"><label>最高</label><span data-field="high">' + formatPrice(q.high, q.market, q.symbol) + '</span></div>' +
+      '<div class="detail-item"><label>最低</label><span data-field="low">' + formatPrice(q.low, q.market, q.symbol) + '</span></div>' +
       '<div class="detail-item"><label>成交量</label><span data-field="vol">' + formatVol(q.volume) + '</span></div>' +
       '<div class="detail-item"><label>更新時間</label><span data-field="time" style="font-size:13px">' + escapeHtml(q.time || '—') + '</span></div>' +
       '</div><div class="modal-actions">' +
@@ -643,6 +714,7 @@
     setTimeout(function () { old.classList.remove('exit-left'); }, 320);
     next.classList.add('active');
     currentPage = page;
+    pageVersion += 1;
     document.getElementById('page-title').textContent = next.dataset.title;
     document.querySelectorAll('.nav-item').forEach(function (n) {
       n.classList.toggle('active', n.dataset.page === page);
@@ -667,10 +739,15 @@
 
   async function refresh() {
     if (inFlight || document.visibilityState === 'hidden') return;
+    if (!isOnline) { scheduleRefresh(); return; }
     inFlight = true;
+    var ver = pageVersion;
+    var pageAtStart = currentPage;
     var dot = document.getElementById('refresh-dot');
-    dot.classList.add('pulse');
-    setTimeout(function () { dot.classList.remove('pulse'); }, 800);
+    if (dot) {
+      dot.classList.add('pulse');
+      setTimeout(function () { dot.classList.remove('pulse'); }, 800);
+    }
     var needed = collectNeeded();
     if (!needed.length) { inFlight = false; hasFetchedOnce = true; scheduleRefresh(); return; }
     try {
@@ -681,8 +758,11 @@
       consecutiveFails = 0;
       hasFetchedOnce = true;
       if (isOnline) setStatus(null); else setStatus('offline', '目前離線 · 顯示快取行情');
-      if (currentPage === 'watchlist') renderWatchlist(false);
-      if (currentPage === 'markets') renderMarkets(false);
+      // 切頁後不繪製錯誤頁
+      if (ver === pageVersion) {
+        if (pageAtStart === 'watchlist' && currentPage === 'watchlist') renderWatchlist(false);
+        if (pageAtStart === 'markets' && currentPage === 'markets') renderMarkets(false);
+      }
       if (selectedKey) updateModalPrices();
       checkMarketSessionToasts();
     } catch (e) {
@@ -690,8 +770,10 @@
       hasFetchedOnce = true;
       if (!navigator.onLine) setStatus('offline', '目前離線 · 顯示快取行情');
       else setStatus('warn', '行情連線不穩 · 重試中');
-      if (currentPage === 'watchlist') renderWatchlist(true);
-      if (currentPage === 'markets') renderMarkets(true);
+      if (ver === pageVersion) {
+        if (currentPage === 'watchlist') renderWatchlist(true);
+        if (currentPage === 'markets') renderMarkets(true);
+      }
     } finally {
       inFlight = false;
       scheduleRefresh();
@@ -701,6 +783,7 @@
   function scheduleRefresh() {
     if (pollTimer) clearTimeout(pollTimer);
     if (document.visibilityState === 'hidden') return;
+    if (!isOnline) return;
     pollTimer = setTimeout(refresh, pollInterval);
   }
   function startPolling() {
@@ -766,7 +849,7 @@
       var done = false;
       var timer = setTimeout(function () {
         if (done) return; done = true; script.remove(); resolve([]);
-      }, 4000);
+      }, 2500);
       script.onload = function () {
         if (done) return; done = true; clearTimeout(timer);
         var raw = window.v_hint;
@@ -834,15 +917,17 @@
   function resolveSearch(raw) {
     raw = raw.trim();
     if (!raw) return null;
-    // preset 優先（HSI / DJI / IXIC / INX 與中文名）
-    var q = raw.toLowerCase();
+    var q = toTraditional(raw).toLowerCase();
     var all = PRESETS.hk.map(function (p) { return Object.assign({}, p, { market: 'hk' }); })
       .concat(PRESETS.us.map(function (p) { return Object.assign({}, p, { market: 'us' }); }));
     var hit = all.find(function (p) {
       return p.symbol.toLowerCase() === q || p.name.toLowerCase().indexOf(q) !== -1;
     });
     if (hit) return { market: hit.market, symbol: hit.symbol };
-    if (/^\d+$/.test(raw)) return { market: 'hk', symbol: raw.padStart(5, '0') };
+    if (/^\d+$/.test(raw)) {
+      if (raw.length > 5) return null;
+      return { market: 'hk', symbol: raw.padStart(5, '0') };
+    }
     if (/^[A-Za-z][A-Za-z0-9.]*$/.test(raw)) return { market: 'us', symbol: raw.toUpperCase() };
     return null;
   }
@@ -857,7 +942,7 @@
     });
     if (sessionToastState[key]) return;
     sessionToastState[key] = 1;
-    localStorage.setItem(SESSION_TOAST_KEY, JSON.stringify(sessionToastState));
+    lsSet(SESSION_TOAST_KEY, JSON.stringify(sessionToastState));
     showToast(msg, 4000, 'session');
   }
   function tzParts(fmt) {
@@ -867,22 +952,44 @@
     return { weekday: map.weekday, mins: parseInt(map.hour, 10) * 60 + parseInt(map.minute, 10) };
   }
   function isWeekday(wd) { return ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].indexOf(wd) !== -1; }
+  function describeHkSession(hk) {
+    if (!isWeekday(hk.weekday)) return { text: '休市', open: false };
+    // 08:30–09:00 開市前競價（輸入買賣盤）
+    if (hk.mins >= 510 && hk.mins < 540) return { text: '開市前', open: false };
+    if (hk.mins >= 540 && hk.mins < 570) return { text: '競價', open: true };
+    if (hk.mins >= 570 && hk.mins < 720) return { text: '早市', open: true };
+    if (hk.mins >= 720 && hk.mins < 780) return { text: '午休', open: false };
+    if (hk.mins >= 780 && hk.mins < 960) return { text: '午市', open: true };
+    if (hk.mins >= 960) return { text: '收市', open: false };
+    return { text: '未開', open: false };
+  }
+  function describeUsSession(us) {
+    if (!isWeekday(us.weekday)) return { text: '休市', open: false };
+    if (us.mins >= 240 && us.mins < 570) return { text: '盤前', open: false };
+    if (us.mins >= 570 && us.mins < 960) return { text: '交易中', open: true };
+    if (us.mins >= 960 && us.mins < 1200) return { text: '收市', open: false };
+    return { text: '夜盤外', open: false };
+  }
   function checkMarketSessionToasts() {
     if (document.visibilityState === 'hidden') return;
     var hk = tzParts(fmtHK);
     var us = tzParts(fmtUS);
+    var hkS = describeHkSession(hk);
+    var usS = describeUsSession(us);
+    // 頂部常駐提醒（方便對照當下是否交易時段）
+    sessionStatusText = '港 ' + hkS.text + ' · 美 ' + usS.text;
+    sessionStatusTone = (hkS.open || usS.open) ? 'open' : 'closed';
+    paintStatusBar();
+    // 關鍵節點仍彈一次 toast
     if (isWeekday(hk.weekday)) {
       if (hk.mins >= 540 && hk.mins < 570) sessionToastOnce('hk-auction', '港股開市競價時段（09:00–09:30）');
       else if (hk.mins >= 720 && hk.mins < 780) sessionToastOnce('hk-lunch', '港股午間休市（12:00–13:00）');
       else if (hk.mins >= 960 && hk.mins < 970) sessionToastOnce('hk-close', '港股已收市（16:00）');
-      else if (hk.mins >= 570 && hk.mins < 720) sessionToastOnce('hk-am', '港股早市交易中');
-      else if (hk.mins >= 780 && hk.mins < 960) sessionToastOnce('hk-pm', '港股午市交易中');
-    } else sessionToastOnce('hk-weekend', '今日港股休市（週末）');
+    }
     if (isWeekday(us.weekday)) {
-      if (us.mins >= 570 && us.mins < 960) sessionToastOnce('us-open', '美股交易時段中（美東時間）');
+      if (us.mins >= 570 && us.mins < 580) sessionToastOnce('us-open', '美股已開市（美東時間）');
       else if (us.mins >= 960 && us.mins < 970) sessionToastOnce('us-close', '美股已收市（美東 16:00）');
-      else if (us.mins >= 240 && us.mins < 570) sessionToastOnce('us-pre', '美股盤前時段');
-    } else sessionToastOnce('us-weekend', '今日美股休市（週末）');
+    }
   }
 
   document.querySelectorAll('.nav-item').forEach(function (item) {
@@ -973,15 +1080,27 @@
   document.querySelectorAll('.interval-btn').forEach(function (btn) {
     btn.classList.toggle('active', parseInt(btn.dataset.ms, 10) === pollInterval);
     btn.addEventListener('click', function () {
-      document.querySelectorAll('.interval-btn').forEach(function (b) { b.classList.remove('active'); });
-      btn.classList.add('active');
-      pollInterval = parseInt(btn.dataset.ms, 10);
-      localStorage.setItem(INTERVAL_KEY, String(pollInterval));
+      var ms = parseInt(btn.dataset.ms, 10);
+      if (ALLOWED_INTERVALS.indexOf(ms) < 0) return;
+      document.querySelectorAll('.interval-btn').forEach(function (b) {
+        b.classList.remove('active', 'pop');
+      });
+      btn.classList.add('active', 'pop');
+      setTimeout(function () { btn.classList.remove('pop'); }, 360);
+      var changed = pollInterval !== ms;
+      pollInterval = ms;
+      lsSet(INTERVAL_KEY, String(pollInterval));
       startPolling();
-      showToast('已設為每 ' + (pollInterval / 1000) + ' 秒更新');
+      try { if (navigator.vibrate) navigator.vibrate(10); } catch (e) {}
+      showToast(
+        changed ? ('已設為每 ' + (pollInterval / 1000) + ' 秒更新') : ('目前已是每 ' + (pollInterval / 1000) + ' 秒'),
+        2200,
+        'success'
+      );
     });
   });
   document.getElementById('btn-clear').addEventListener('click', function () {
+    if (!window.confirm('確定清空全部自選？此操作無法復原。')) return;
     watchlist = [];
     saveWatchlist();
     renderWatchlist(true);
@@ -998,7 +1117,9 @@
     isOnline = true; consecutiveFails = 0; setStatus(null); startPolling(); showToast('已恢復連線');
   });
   window.addEventListener('offline', function () {
-    isOnline = false; setStatus('offline', '目前離線 · 顯示快取行情');
+    isOnline = false;
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    setStatus('offline', '目前離線 · 顯示快取行情');
   });
 
   loadWatchlist();
@@ -1008,27 +1129,46 @@
     '<div style="color:var(--text-tertiary);font-size:13px;padding:8px 4px">輸入代碼或名稱查看建議</div>';
   renderAuthPanel();
 
-  if (sb) {
-    sb.auth.getSession().then(function (res) {
-      if (res.data && res.data.session) bootSync(res.data.session.user);
-    });
-    sb.auth.onAuthStateChange(function (event, session) {
-      if (session && session.user) bootSync(session.user);
-      else if (event === 'SIGNED_OUT') {
-        currentUser = null; bootSynced = false; renderAuthPanel();
-      }
-    });
+  // 若本機已綁定 Email，啟動時靜默嘗試載入雲端（不寄信）
+  if (sb && boundEmail) {
+    syncWatchlistDown({ toast: false });
   }
 
   if (!navigator.onLine) { isOnline = false; setStatus('offline', '目前離線 · 顯示快取行情'); }
   startPolling();
-  setTimeout(checkMarketSessionToasts, 1200);
+  checkMarketSessionToasts();
+  setInterval(checkMarketSessionToasts, 30000);
 
   // 關閉前補一次上傳，避免 debounce 未觸發就離頁
   window.addEventListener('pagehide', function () {
     if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; }
-    if (sb && currentUser) { try { syncWatchlistUp(); } catch (e) {} }
+    if (!sb || !boundEmail) return;
+    var id = cloudRowId();
+    if (!id) return;
+    try {
+      var payload = JSON.stringify({
+        id: id,
+        data: { items: watchlist },
+        updated_at: new Date().toISOString()
+      });
+      // keepalive 讓瀏覽器在卸載後仍盡力送出
+      fetch(SUPABASE_URL + '/rest/v1/notepad_data?on_conflict=id', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_ANON,
+          'Authorization': 'Bearer ' + SUPABASE_ANON,
+          'Prefer': 'resolution=merge-duplicates'
+        },
+        body: payload,
+        keepalive: true
+      }).catch(function () {});
+    } catch (e) {}
   });
 
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function () {});
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js?v=10').then(function (reg) {
+      try { reg.update(); } catch (e) {}
+    }).catch(function () {});
+  }
 })();
