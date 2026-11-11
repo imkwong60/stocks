@@ -1,4 +1,4 @@
-const CACHE = 'quote-pwa-v6';
+const CACHE = 'quote-pwa-v10';
 const ASSETS = [
   './',
   './index.html',
@@ -26,10 +26,31 @@ self.addEventListener('activate', (e) => {
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
-  if (url.hostname.includes('gtimg.cn') || url.hostname.includes('supabase') || url.hostname.includes('jsdelivr')) {
+
+  if (
+    url.hostname.includes('gtimg.cn') ||
+    url.hostname.includes('smartbox') ||
+    url.hostname.includes('supabase') ||
+    url.hostname.includes('jsdelivr')
+  ) {
     e.respondWith(fetch(e.request).catch(() => caches.match(e.request)));
     return;
   }
+
+  // HTML / JS：網路優先，避免一直看到舊版
+  if (url.pathname.endsWith('.html') || url.pathname.endsWith('.js') || url.pathname.endsWith('/')) {
+    e.respondWith(
+      fetch(e.request)
+        .then((res) => {
+          const copy = res.clone();
+          caches.open(CACHE).then((cache) => cache.put(e.request, copy));
+          return res;
+        })
+        .catch(() => caches.match(e.request))
+    );
+    return;
+  }
+
   e.respondWith(
     caches.match(e.request).then((cached) => cached || fetch(e.request))
   );
