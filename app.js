@@ -77,12 +77,13 @@
   PRESETS.us.forEach(function (p) { NAME_MAP['us:' + p.symbol] = p.name; });
 
   var watchlist = [];
+  var watchlistDrag = null;
   var quotes = {};
   var currentPage = 'watchlist';
   var pageVersion = 0;
-  var ALLOWED_INTERVALS = [30000, 60000, 300000];
-  var pollInterval = parseInt(lsGet(INTERVAL_KEY, '60000'), 10);
-  if (ALLOWED_INTERVALS.indexOf(pollInterval) < 0) pollInterval = 60000;
+  var ALLOWED_INTERVALS = [0, 30000, 60000, 300000];
+  var pollInterval = parseInt(lsGet(INTERVAL_KEY, '0'), 10);
+  if (ALLOWED_INTERVALS.indexOf(pollInterval) < 0) pollInterval = 0;
   var pollTimer = null;
   var selectedKey = null;
   var inFlight = false;
@@ -252,12 +253,20 @@
     }).filter(Boolean);
   }
 
+  function isOnlyDefaultWatchlist(items) {
+    var defaults = ['hk:HSI', 'hk:00700', 'us:DJI', 'us:AAPL', 'us:NVDA'];
+    return items.length === defaults.length &&
+      items.every(function (item) { return defaults.indexOf(item.key) !== -1; });
+  }
+
   function loadWatchlist() {
     var raw = lsGet(STORAGE_KEY, null);
     // 有 v2 資料（含空陣列）= 已初始化，不可再播種
     if (raw !== null) {
       try { watchlist = normalizeWatchlist(JSON.parse(raw) || []); } catch (e) { watchlist = []; }
+      if (isOnlyDefaultWatchlist(watchlist)) watchlist = [];
       lsSet(INIT_KEY, '1');
+      lsSet(STORAGE_KEY, JSON.stringify(watchlist));
     } else {
       var old = lsGet(STORAGE_KEY_V1, null);
       if (old) {
@@ -268,6 +277,7 @@
               var market = w.market || (/^\d+$/.test(w.symbol) ? 'hk' : 'us');
               return { key: makeKey(market, w.symbol), symbol: w.symbol, market: market };
             });
+            if (isOnlyDefaultWatchlist(watchlist)) watchlist = [];
             lsSet(STORAGE_KEY, JSON.stringify(watchlist));
             lsSet(INIT_KEY, '1');
             return;
@@ -275,13 +285,7 @@
         } catch (e) {}
       }
       if (!lsGet(INIT_KEY, null)) {
-        watchlist = [
-          { key: 'hk:HSI', symbol: 'HSI', market: 'hk' },
-          { key: 'hk:00700', symbol: '00700', market: 'hk' },
-          { key: 'us:DJI', symbol: 'DJI', market: 'us' },
-          { key: 'us:AAPL', symbol: 'AAPL', market: 'us' },
-          { key: 'us:NVDA', symbol: 'NVDA', market: 'us' }
-        ];
+        watchlist = [];
         lsSet(STORAGE_KEY, JSON.stringify(watchlist));
         lsSet(INIT_KEY, '1');
       }
@@ -445,25 +449,28 @@
 
   function stockRowHtml(q, opts) {
     opts = opts || {};
+    var dragHandle = opts.reorder ?
+      '<button type="button" class="drag-handle" aria-label="拖放排序" title="拖放排序">⠿</button>' : '';
     if (opts.loading) {
       return '<div class="card stock-row" data-key="' + escapeHtml(opts.key) + '" tabindex="0" role="button">' +
         '<div class="stock-info"><div class="stock-name skeleton" style="width:100px;height:18px"></div>' +
         '<div class="stock-code">' + escapeHtml(opts.symbol || '') + '</div></div>' +
-        '<div class="stock-price-block"><div class="skeleton" style="width:70px;height:20px;margin-left:auto"></div></div></div>';
+        '<div class="stock-price-block"><div class="skeleton" style="width:70px;height:20px;margin-left:auto"></div></div>' +
+        dragHandle + '</div>';
     }
     if (opts.failed || !q) {
       return '<div class="card stock-row" data-key="' + escapeHtml(opts.key) + '" tabindex="0" role="button">' +
         '<div class="stock-info"><div class="stock-name" data-field="name">' + escapeHtml(opts.name || opts.symbol || '—') + '</div>' +
         '<div class="stock-code">' + escapeHtml(opts.symbol || '') + ' · ' + (opts.market || '').toUpperCase() + '</div></div>' +
         '<div class="stock-price-block"><div class="stock-price fail-text" data-field="price">—</div>' +
-        '<div class="stock-change flat" data-field="change">無法取得</div></div></div>';
+        '<div class="stock-change flat" data-field="change">無法取得</div></div>' + dragHandle + '</div>';
     }
     var ch = formatChange(q.change, q.changePct, q.market);
     return '<div class="card stock-row" data-key="' + escapeHtml(q.key) + '" tabindex="0" role="button">' +
       '<div class="stock-info"><div class="stock-name" data-field="name">' + escapeHtml(q.name) + '</div>' +
       '<div class="stock-code">' + escapeHtml(q.symbol) + ' · ' + q.market.toUpperCase() + '</div></div>' +
       '<div class="stock-price-block"><div class="stock-price" data-field="price">' + formatPrice(q.price, q.market, q.symbol) + '</div>' +
-      '<div class="stock-change ' + ch.cls + '" data-field="change">' + ch.text + '</div></div></div>';
+      '<div class="stock-change ' + ch.cls + '" data-field="change">' + ch.text + '</div></div>' + dragHandle + '</div>';
   }
 
   function updateRowPrices(container) {
@@ -512,11 +519,11 @@
       var q = quotes[item.key];
       if (!q) {
         if (hasFetchedOnce || consecutiveFails > 0) {
-          return stockRowHtml(null, { key: item.key, symbol: item.symbol, market: item.market, name: NAME_MAP[item.key] || item.symbol, failed: true });
+          return stockRowHtml(null, { key: item.key, symbol: item.symbol, market: item.market, name: NAME_MAP[item.key] || item.symbol, failed: true, reorder: true });
         }
-        return stockRowHtml(null, { key: item.key, symbol: item.symbol, market: item.market, loading: true });
+        return stockRowHtml(null, { key: item.key, symbol: item.symbol, market: item.market, loading: true, reorder: true });
       }
-      return stockRowHtml(q);
+      return stockRowHtml(q, { reorder: true });
     }).join('');
   }
 
@@ -666,7 +673,7 @@
       n.classList.toggle('active', n.dataset.page === page);
     });
     if (page === 'watchlist') renderWatchlist(true);
-    if (page === 'markets') { renderMarkets(true); scheduleRefresh(); }
+    if (page === 'markets') { renderMarkets(true); refresh(); }
     if (page === 'search') renderPresets();
     if (page === 'settings') renderAuthPanel();
   }
@@ -728,7 +735,7 @@
 
   function scheduleRefresh() {
     if (pollTimer) clearTimeout(pollTimer);
-    if (document.visibilityState === 'hidden') return;
+    if (!pollInterval || document.visibilityState === 'hidden') return;
     if (!isOnline) return;
     pollTimer = setTimeout(refresh, pollInterval);
   }
@@ -736,6 +743,81 @@
     if (pollTimer) clearTimeout(pollTimer);
     refresh();
   }
+
+  var watchlistEl = document.getElementById('watchlist-content');
+  watchlistEl.addEventListener('pointerdown', function (e) {
+    var handle = e.target.closest('.drag-handle');
+    var row = handle && handle.closest('.stock-row[data-key]');
+    if (!row || e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    watchlistDrag = {
+      handle: handle,
+      row: row,
+      pointerId: e.pointerId,
+      originalKeys: watchlist.map(function (item) { return item.key; })
+    };
+    row.classList.add('dragging');
+    if (handle.setPointerCapture) handle.setPointerCapture(e.pointerId);
+  });
+  watchlistEl.addEventListener('pointermove', function (e) {
+    if (!watchlistDrag || e.pointerId !== watchlistDrag.pointerId) return;
+    e.preventDefault();
+    var target = document.elementFromPoint(e.clientX, e.clientY);
+    target = target && target.closest('.stock-row[data-key]');
+    if (!target || target === watchlistDrag.row || target.parentNode !== watchlistEl) return;
+    var rect = target.getBoundingClientRect();
+    watchlistEl.insertBefore(watchlistDrag.row, e.clientY < rect.top + rect.height / 2 ? target : target.nextSibling);
+  });
+  function finishWatchlistDrag(commit) {
+    if (!watchlistDrag) return;
+    var drag = watchlistDrag;
+    watchlistDrag = null;
+    drag.row.classList.remove('dragging');
+    if (!commit) {
+      renderWatchlist(true);
+      return;
+    }
+    var ordered = [];
+    watchlistEl.querySelectorAll('.stock-row[data-key]').forEach(function (row) {
+      var item = watchlist.find(function (entry) { return entry.key === row.dataset.key; });
+      if (item) ordered.push(item);
+    });
+    if (ordered.length === watchlist.length &&
+        ordered.some(function (item, index) { return item.key !== drag.originalKeys[index]; })) {
+      watchlist = ordered;
+      saveWatchlist();
+    }
+  }
+  watchlistEl.addEventListener('pointerup', function (e) {
+    if (!watchlistDrag || e.pointerId !== watchlistDrag.pointerId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    finishWatchlistDrag(true);
+  });
+  watchlistEl.addEventListener('pointercancel', function () { finishWatchlistDrag(false); });
+  watchlistEl.addEventListener('click', function (e) {
+    if (e.target.closest('.drag-handle')) e.stopPropagation();
+  });
+  watchlistEl.addEventListener('keydown', function (e) {
+    var handle = e.target.closest('.drag-handle');
+    if (!handle || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    var row = handle.closest('.stock-row[data-key]');
+    var from = watchlist.findIndex(function (item) { return item.key === row.dataset.key; });
+    var to = from + (e.key === 'ArrowUp' ? -1 : 1);
+    if (from < 0 || to < 0 || to >= watchlist.length) return;
+    var moved = watchlist.splice(from, 1)[0];
+    watchlist.splice(to, 0, moved);
+    saveWatchlist();
+    renderWatchlist(true);
+    var nextHandle = null;
+    watchlistEl.querySelectorAll('.stock-row[data-key]').forEach(function (itemRow) {
+      if (itemRow.dataset.key === moved.key) nextHandle = itemRow.querySelector('.drag-handle');
+    });
+    if (nextHandle) nextHandle.focus();
+  });
 
   async function searchSuggest(q) {
     var res = await fetch('/api/market', {
@@ -954,104 +1036,4 @@
     document.getElementById(id).addEventListener('click', function (e) {
       var row = e.target.closest('.stock-row[data-key]');
       if (row) openDetail(row.dataset.key, true);
-    });
-  }
-  bindList('watchlist-content');
-  bindList('markets-content');
-  document.querySelectorAll('.interval-btn').forEach(function (btn) {
-    btn.classList.toggle('active', parseInt(btn.dataset.ms, 10) === pollInterval);
-    btn.addEventListener('click', function () {
-      var ms = parseInt(btn.dataset.ms, 10);
-      if (ALLOWED_INTERVALS.indexOf(ms) < 0) return;
-      document.querySelectorAll('.interval-btn').forEach(function (b) {
-        b.classList.remove('active', 'pop');
-      });
-      btn.classList.add('active', 'pop');
-      setTimeout(function () { btn.classList.remove('pop'); }, 360);
-      var changed = pollInterval !== ms;
-      pollInterval = ms;
-      lsSet(INTERVAL_KEY, String(pollInterval));
-      startPolling();
-      try { if (navigator.vibrate) navigator.vibrate(10); } catch (e) {}
-      var intervalLabel = pollInterval < 60000 ?
-        (pollInterval / 1000) + ' 秒' : (pollInterval / 60000) + ' 分鐘';
-      showToast(
-        changed ? ('已設為每 ' + intervalLabel + ' 更新') : ('目前已是每 ' + intervalLabel),
-        2200,
-        'success'
-      );
-    });
-  });
-  document.getElementById('btn-clear').addEventListener('click', function () {
-    if (!window.confirm('確定清空全部自選？此操作無法復原。')) return;
-    watchlist = [];
-    saveWatchlist();
-    renderWatchlist(true);
-    renderPresets();
-    showToast('已清空自選');
-  });
-  document.getElementById('modal-overlay').addEventListener('click', closeModal);
-  document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible') {
-      consecutiveFails = 0; startPolling(); checkMarketSessionToasts();
-    } else if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
-  });
-  window.addEventListener('online', function () {
-    isOnline = true; consecutiveFails = 0; setStatus(null); startPolling(); showToast('已恢復連線');
-  });
-  window.addEventListener('offline', function () {
-    isOnline = false;
-    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
-    setStatus('offline', '目前離線 · 顯示快取行情');
-  });
-
-  loadWatchlist();
-  renderPresets();
-  renderWatchlist(true);
-  document.getElementById('search-result').innerHTML =
-    '<div style="color:var(--text-tertiary);font-size:13px;padding:8px 4px">輸入代碼或名稱查看建議</div>';
-  renderAuthPanel();
-
-  // 若本機已綁定 Email，啟動時靜默嘗試載入雲端（不寄信）
-  if (sb && boundEmail) {
-    syncWatchlistDown({ toast: false });
-  }
-
-  if (!navigator.onLine) { isOnline = false; setStatus('offline', '目前離線 · 顯示快取行情'); }
-  startPolling();
-  checkMarketSessionToasts();
-  setInterval(checkMarketSessionToasts, 30000);
-
-  // 關閉前補一次上傳，避免 debounce 未觸發就離頁
-  window.addEventListener('pagehide', function () {
-    if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; }
-    if (!sb || !boundEmail) return;
-    var id = cloudRowId();
-    if (!id) return;
-    try {
-      var payload = JSON.stringify({
-        id: id,
-        data: { items: watchlist },
-        updated_at: new Date().toISOString()
-      });
-      // keepalive 讓瀏覽器在卸載後仍盡力送出
-      fetch(SUPABASE_URL + '/rest/v1/notepad_data?on_conflict=id', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': SUPABASE_ANON,
-          'Authorization': 'Bearer ' + SUPABASE_ANON,
-          'Prefer': 'resolution=merge-duplicates'
-        },
-        body: payload,
-        keepalive: true
-      }).catch(function () {});
-    } catch (e) {}
-  });
-
-  if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js?v=11').then(function (reg) {
-      try { reg.update(); } catch (e) {}
-    }).catch(function () {});
-  }
-})();
+  
