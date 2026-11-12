@@ -7,6 +7,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="theme-color" content="#f4efe6" />
   <meta name="description" content="股票本本 · 港股美股即時報價 PWA" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; object-src 'none'; base-uri 'self'; form-action 'self'" />
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" type="image/png" href="icons/icon-192.png" />
   <link rel="apple-touch-icon" href="icons/icon-180.png" />
@@ -336,7 +337,6 @@
           <div style="font-weight:600;margin-bottom:8px">重新整理間隔</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
             <button class="pill interval-btn active" data-ms="0">永不</button>
-            <button class="pill interval-btn" data-ms="30000">30 秒</button>
             <button class="pill interval-btn" data-ms="60000">1 分鐘</button>
             <button class="pill interval-btn" data-ms="300000">5 分鐘</button>
           </div>
@@ -361,6 +361,6 @@
     <div class="modal-handle"></div>
     <div id="modal-content"></div>
   </div>
-  <script src="app.js?v=15" defer></script>
+  <script src="app.js?v=17" defer></script>
 </body>
 </html>
