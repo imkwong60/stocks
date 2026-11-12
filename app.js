@@ -66,6 +66,12 @@
     ]
   };
 
+  var MARKET_INDICES = [
+    { market: 'hk', symbol: 'HSI', name: '恆生指數', index: true },
+    { market: 'us', symbol: 'DJI', name: '道瓊斯', index: true },
+    { market: 'us', symbol: 'INX', name: '標普500', index: true }
+  ];
+
   var NAME_MAP = {};
   PRESETS.hk.forEach(function (p) { NAME_MAP['hk:' + p.symbol] = p.name; });
   PRESETS.us.forEach(function (p) { NAME_MAP['us:' + p.symbol] = p.name; });
@@ -74,7 +80,6 @@
   var quotes = {};
   var currentPage = 'watchlist';
   var pageVersion = 0;
-  var currentMarket = 'hk';
   var ALLOWED_INTERVALS = [30000, 60000, 300000];
   var pollInterval = parseInt(lsGet(INTERVAL_KEY, '60000'), 10);
   if (ALLOWED_INTERVALS.indexOf(pollInterval) < 0) pollInterval = 60000;
@@ -516,9 +521,9 @@
   }
 
   function renderMarkets(forceFull) {
-    var list = PRESETS[currentMarket];
+    var list = MARKET_INDICES;
     var el = document.getElementById('markets-content');
-    var keys = list.map(function (p) { return makeKey(currentMarket, p.symbol); });
+    var keys = list.map(function (p) { return makeKey(p.market, p.symbol); });
     if (!forceFull) {
       var existing = el.querySelectorAll('.stock-row[data-key]');
       var same = existing.length === keys.length &&
@@ -528,13 +533,13 @@
       if (same && updateRowPrices(el)) return;
     }
     el.innerHTML = list.map(function (item) {
-      var key = makeKey(currentMarket, item.symbol);
+      var key = makeKey(item.market, item.symbol);
       var q = quotes[key];
       if (!q) {
         if (hasFetchedOnce || consecutiveFails > 0) {
-          return stockRowHtml(null, { key: key, symbol: item.symbol, market: currentMarket, name: item.name, failed: true });
+          return stockRowHtml(null, { key: key, symbol: item.symbol, market: item.market, name: item.name, failed: true });
         }
-        return stockRowHtml(null, { key: key, symbol: item.symbol, market: currentMarket, name: item.name, loading: true });
+        return stockRowHtml(null, { key: key, symbol: item.symbol, market: item.market, name: item.name, loading: true });
       }
       return stockRowHtml(q);
     }).join('');
@@ -670,9 +675,9 @@
     var map = {};
     watchlist.forEach(function (w) { map[w.key] = { symbol: w.symbol, market: w.market }; });
     if (currentPage === 'markets') {
-      PRESETS[currentMarket].forEach(function (p) {
-        var key = makeKey(currentMarket, p.symbol);
-        if (!map[key]) map[key] = { symbol: p.symbol, market: currentMarket };
+      MARKET_INDICES.forEach(function (p) {
+        var key = makeKey(p.market, p.symbol);
+        if (!map[key]) map[key] = { symbol: p.symbol, market: p.market };
       });
     }
     return Object.keys(map).map(function (k) { return map[k]; });
@@ -875,15 +880,6 @@
 
   document.querySelectorAll('.nav-item').forEach(function (item) {
     item.addEventListener('click', function () { switchPage(item.dataset.page); });
-  });
-  document.querySelectorAll('.market-tab').forEach(function (tab) {
-    tab.addEventListener('click', function () {
-      document.querySelectorAll('.market-tab').forEach(function (t) { t.classList.remove('active'); });
-      tab.classList.add('active');
-      currentMarket = tab.dataset.market;
-      renderMarkets(true);
-      scheduleRefresh();
-    });
   });
   document.getElementById('btn-refresh').addEventListener('click', function () {
     if (inFlight) { showToast('更新中…'); return; }
