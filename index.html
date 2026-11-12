@@ -149,9 +149,6 @@
     .stock-change.up { color: var(--up); background: var(--up-bg); }
     .stock-change.down { color: var(--down); background: var(--down-bg); }
     .stock-change.flat { color: var(--text-secondary); background: rgba(0,0,0,0.04); }
-    .market-tabs { display: flex; gap: 8px; margin-bottom: 16px; overflow-x: auto; scrollbar-width: none; }
-    .market-tabs::-webkit-scrollbar { display: none; }
-    .market-tab.active { background: var(--accent-soft); border-color: rgba(47, 111, 237, 0.35); color: var(--accent); }
     .search-box { display: flex; gap: 10px; margin-bottom: 16px; }
     .search-input {
       flex: 1; height: 44px; border-radius: var(--radius-pill); border: 1px solid var(--glass-border);
@@ -306,11 +303,7 @@
     <div class="pages">
       <section class="page active" id="page-watchlist" data-title="自選"><div id="watchlist-content"></div></section>
       <section class="page" id="page-markets" data-title="市場">
-        <div class="market-tabs" role="tablist">
-          <button class="pill market-tab active" data-market="hk">港股</button>
-          <button class="pill market-tab" data-market="us">美股</button>
-        </div>
-        <div class="section-title">熱門標的</div>
+        <div class="section-title">主要指數</div>
         <div id="markets-content"></div>
       </section>
       <section class="page" id="page-search" data-title="搜尋">
