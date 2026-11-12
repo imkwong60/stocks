@@ -75,9 +75,9 @@
   var currentPage = 'watchlist';
   var pageVersion = 0;
   var currentMarket = 'hk';
-  var ALLOWED_INTERVALS = [3000, 5000, 10000, 30000];
-  var pollInterval = parseInt(lsGet(INTERVAL_KEY, '5000'), 10);
-  if (ALLOWED_INTERVALS.indexOf(pollInterval) < 0) pollInterval = 5000;
+  var ALLOWED_INTERVALS = [30000, 60000, 300000];
+  var pollInterval = parseInt(lsGet(INTERVAL_KEY, '60000'), 10);
+  if (ALLOWED_INTERVALS.indexOf(pollInterval) < 0) pollInterval = 60000;
   var pollTimer = null;
   var selectedKey = null;
   var inFlight = false;
@@ -231,18 +231,6 @@
     }
     return symbol;
   }
-
-  function toQueryCode(item) {
-    if (item.market === 'hk') {
-      if (item.symbol === 'HSI') return 'hkHSI';
-      return 'hk' + String(item.symbol).padStart(5, '0');
-    }
-    if (item.symbol === 'DJI' || item.symbol === '.DJI') return 'usDJI';
-    if (item.symbol === 'IXIC' || item.symbol === '.IXIC') return 'usIXIC';
-    if (item.symbol === 'INX' || item.symbol === '.INX') return 'usINX';
-    return 'us' + String(item.symbol).toUpperCase();
-  }
-  function expectedVarName(item) { return 'v_' + toQueryCode(item); }
 
   function normalizeWatchlist(items) {
     if (!Array.isArray(items)) return [];
@@ -415,86 +403,39 @@
 
   function fetchQuotes(items) {
     if (!items.length) return Promise.resolve({});
-    // CORS 已開放：用 fetch + GBK 解碼，避免 usBRK.B 這類變數名導致 script 語法錯誤
-    var qs = items.map(toQueryCode).join(',');
-    var reqMap = {};
-    items.forEach(function (item) {
-      reqMap[expectedVarName(item)] = item;
-      // 也用請求碼索引
-      reqMap[toQueryCode(item)] = item;
-    });
-    return fetch('https://qt.gtimg.cn/q=' + qs + '&_=' + Date.now(), { cache: 'no-store' })
-      .then(function (res) {
-        if (!res.ok) throw new Error('http ' + res.status);
-        return res.arrayBuffer();
-      })
-      .then(function (buf) {
-        var text;
-        try { text = new TextDecoder('gbk').decode(buf); }
-        catch (e1) {
-          try { text = new TextDecoder('gb18030').decode(buf); }
-          catch (e2) { text = new TextDecoder('utf-8').decode(buf); }
-        }
-        var result = {};
-        // 匹配 v_xxx="..."（xxx 可含點號）
-        var re = /v_([^=\s]+)="([^"]*)"/g;
-        var m;
-        while ((m = re.exec(text))) {
-          var varName = 'v_' + m[1];
-          var fieldStr = m[2];
-          var req = reqMap[varName] || reqMap[m[1]];
-          var parsed = parseOneQuote(varName, fieldStr, req);
-          if (parsed) result[parsed.key] = parsed;
-        }
-        return result;
+    return fetch('/api/market', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify({ action: 'quotes', items: items })
+    }).then(function (res) {
+      return res.json().then(function (payload) {
+        if (!res.ok) throw new Error(payload.error || '行情查詢失敗');
+        return payload;
       });
-  }
-
-  // 騰訊 qt 欄位偏移（集改格式時集中調整）
-  var FIELD = {
-    NAME: 1, SYMBOL: 2, PRICE: 3, PREV: 4, OPEN: 5, VOLUME: 6,
-    TIME: 30, CHANGE: 31, PCT: 32, HIGH: 33, LOW: 34, US_CURRENCY: 35, HK_CURRENCY: 75
-  };
-
-  function parseOneQuote(varName, fieldStr, reqItem) {
-    var fields = fieldStr.split('~');
-    if (fields.length < 35) {
-      try { console.warn('quote fields short', varName, fields.length); } catch (e) {}
-      return null;
-    }
-    var market, symbol, name, price, prevClose, open, high, low, volume, change, changePct, currency, time;
-    if (varName.indexOf('v_hk') === 0) {
-      market = 'hk';
-      if (reqItem && reqItem.symbol) symbol = reqItem.symbol;
-      else if (varName === 'v_hkHSI') symbol = 'HSI';
-      else symbol = fields[2] || varName.slice(4);
-      name = lookupName(market, symbol, fields[FIELD.NAME]);
-      price = num(fields[FIELD.PRICE]); prevClose = num(fields[FIELD.PREV]); open = num(fields[FIELD.OPEN]);
-      volume = num(fields[FIELD.VOLUME]) || 0; change = num(fields[FIELD.CHANGE]); changePct = num(fields[FIELD.PCT]);
-      high = num(fields[FIELD.HIGH]); low = num(fields[FIELD.LOW]); time = fields[FIELD.TIME] || '';
-      currency = (fields.length > FIELD.HK_CURRENCY && fields[FIELD.HK_CURRENCY] && /^[A-Z]{3}$/.test(fields[FIELD.HK_CURRENCY])) ? fields[FIELD.HK_CURRENCY] : 'HKD';
-    } else if (varName.indexOf('v_us') === 0) {
-      market = 'us';
-      if (reqItem && reqItem.symbol) symbol = reqItem.symbol;
-      else {
-        var code = fields[FIELD.SYMBOL] || varName.slice(4);
-        code = code.replace(/^\./, '');
-        code = code.replace(/\.(OQ|N|PK|OB|OTC)$/i, '');
-        symbol = code;
-      }
-      name = lookupName(market, symbol, fields[FIELD.NAME]);
-      price = num(fields[FIELD.PRICE]); prevClose = num(fields[FIELD.PREV]); open = num(fields[FIELD.OPEN]);
-      volume = num(fields[FIELD.VOLUME]) || 0; change = num(fields[FIELD.CHANGE]); changePct = num(fields[FIELD.PCT]);
-      high = num(fields[FIELD.HIGH]); low = num(fields[FIELD.LOW]);
-      currency = (fields[FIELD.US_CURRENCY] && /^[A-Z]{3}$/.test(fields[FIELD.US_CURRENCY])) ? fields[FIELD.US_CURRENCY] : 'USD';
-      time = fields[FIELD.TIME] || '';
-    } else return null;
-    if (price == null) return null;
-    return {
-      key: makeKey(market, symbol), market: market, symbol: symbol, name: name,
-      price: price, prevClose: prevClose, open: open, high: high, low: low,
-      volume: volume, change: change, changePct: changePct, currency: currency, time: time
-    };
+    }).then(function (payload) {
+      var result = {};
+      (payload.quotes || []).forEach(function (quote) {
+        var symbol = quote.symbol;
+        var key = makeKey(quote.market, symbol);
+        var price = num(quote.close);
+        var prevClose = num(quote.previous_close);
+        var change = num(quote.change);
+        if (change == null && price != null && prevClose != null) change = price - prevClose;
+        var changePct = num(quote.percent_change);
+        if (changePct == null && change != null && prevClose) changePct = change / prevClose * 100;
+        if (price == null) return;
+        result[key] = {
+          key: key, market: quote.market, symbol: symbol,
+          name: lookupName(quote.market, symbol, quote.name),
+          price: price, prevClose: prevClose, open: num(quote.open),
+          high: num(quote.high), low: num(quote.low), volume: num(quote.volume) || 0,
+          change: change, changePct: changePct, currency: quote.currency || (quote.market === 'hk' ? 'HKD' : 'USD'),
+          time: quote.datetime || ''
+        };
+      });
+      return result;
+    });
   }
 
   function stockRowHtml(q, opts) {
@@ -791,78 +732,18 @@
     refresh();
   }
 
-  function decodeUnicodeEscapes(str) {
-    return str.replace(/\\u([0-9a-fA-F]{4})/g, function (_, h) {
-      return String.fromCharCode(parseInt(h, 16));
-    });
-  }
-
-  function parseSuggest(text) {
-    var m = text.match(/v_hint="([^"]*)"/);
-    if (!m) return [];
-    var body = decodeUnicodeEscapes(m[1]);
-    if (!body) return [];
-    return body.split('^').map(function (part) {
-      var f = part.split('~');
-      if (f.length < 3) return null;
-      var marketRaw = f[0];
-      var code = f[1] || '';
-      var name = toTraditional(f[2] || code);
-      var market = null;
-      if (marketRaw === 'hk') market = 'hk';
-      else if (marketRaw === 'us') market = 'us';
-      else return null;
-      if (market === 'hk') {
-        code = code.replace(/\D/g, '').padStart(5, '0');
-        if (!code || code === '00000') return null;
-      } else {
-        code = code.replace(/\.(oq|n|pk|ob)$/i, '').toUpperCase();
-        if (!code) return null;
-      }
-      return { market: market, symbol: code, name: name, key: makeKey(market, code) };
-    }).filter(Boolean);
-  }
-
   async function searchSuggest(q) {
-    var fetchOk = false;
-    try {
-      var res = await fetch('https://smartbox.gtimg.cn/s3/?v=2&q=' + encodeURIComponent(q) + '&t=all', { cache: 'no-store' });
-      if (res.ok) {
-        fetchOk = true;
-        var buf = await res.arrayBuffer();
-        var text;
-        try { text = new TextDecoder('gbk').decode(buf); }
-        catch (e1) {
-          try { text = new TextDecoder('gb18030').decode(buf); }
-          catch (e2) { text = new TextDecoder('utf-8').decode(buf); }
-        }
-        // 成功解析（含空結果）就不走 script 兜底，避免雙重請求
-        return parseSuggest(text);
-      }
-    } catch (e) { /* CORS 等 → script 兜底 */ }
-    if (fetchOk) return [];
-    // script 備援
-    return new Promise(function (resolve) {
-      try { delete window.v_hint; } catch (e) { window.v_hint = undefined; }
-      var script = document.createElement('script');
-      script.charset = 'gbk';
-      var done = false;
-      var timer = setTimeout(function () {
-        if (done) return; done = true; script.remove(); resolve([]);
-      }, 2500);
-      script.onload = function () {
-        if (done) return; done = true; clearTimeout(timer);
-        var raw = window.v_hint;
-        try { delete window.v_hint; } catch (e) {}
-        script.remove();
-        if (typeof raw === 'string') resolve(parseSuggest('v_hint="' + raw + '"'));
-        else resolve([]);
-      };
-      script.onerror = function () {
-        if (done) return; done = true; clearTimeout(timer); script.remove(); resolve([]);
-      };
-      script.src = 'https://smartbox.gtimg.cn/s3/?v=2&q=' + encodeURIComponent(q) + '&t=all&_=' + Date.now();
-      document.head.appendChild(script);
+    var res = await fetch('/api/market', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      cache: 'no-store',
+      body: JSON.stringify({ action: 'search', query: q })
+    });
+    var payload = await res.json();
+    if (!res.ok) throw new Error(payload.error || '搜尋失敗');
+    return (payload.results || []).map(function (item) {
+      item.name = toTraditional(item.name || item.symbol);
+      return item;
     });
   }
 
@@ -898,7 +779,7 @@
             try {
               var data = await fetchQuotes([{ market: market, symbol: symbol }]);
               if (data[key]) quotes[key] = data[key];
-            } catch (err) {}
+            } catch (err) { showToast('無法取得行情'); }
           }
           toggleWatch(market, symbol);
           renderPresets();
@@ -1042,22 +923,26 @@
     }
     searchTimer = setTimeout(async function () {
       var mySeq = ++searchSeq;
-      var list = await searchSuggest(raw);
-      if (mySeq !== searchSeq) return; // 過期結果丟棄
-      // 合併 exact（指數等）
-      var exact = resolveSearch(raw);
-      if (exact) {
-        var ek = makeKey(exact.market, exact.symbol);
-        if (!list.some(function (x) { return x.key === ek; })) {
-          list.unshift({
-            market: exact.market,
-            symbol: exact.symbol,
-            name: NAME_MAP[ek] || exact.symbol,
-            key: ek
-          });
+      try {
+        var list = await searchSuggest(raw);
+        if (mySeq !== searchSeq) return; // 過期結果丟棄
+        // 合併 exact（指數等）
+        var exact = resolveSearch(raw);
+        if (exact) {
+          var ek = makeKey(exact.market, exact.symbol);
+          if (!list.some(function (x) { return x.key === ek; })) {
+            list.unshift({
+              market: exact.market,
+              symbol: exact.symbol,
+              name: NAME_MAP[ek] || exact.symbol,
+              key: ek
+            });
+          }
         }
+        renderSearchSuggestions(list);
+      } catch (e) {
+        if (mySeq === searchSeq) showToast('搜尋失敗');
       }
-      renderSearchSuggestions(list);
     }, 350);
   });
   document.getElementById('search-input').addEventListener('keydown', function (e) {
@@ -1092,8 +977,10 @@
       lsSet(INTERVAL_KEY, String(pollInterval));
       startPolling();
       try { if (navigator.vibrate) navigator.vibrate(10); } catch (e) {}
+      var intervalLabel = pollInterval < 60000 ?
+        (pollInterval / 1000) + ' 秒' : (pollInterval / 60000) + ' 分鐘';
       showToast(
-        changed ? ('已設為每 ' + (pollInterval / 1000) + ' 秒更新') : ('目前已是每 ' + (pollInterval / 1000) + ' 秒'),
+        changed ? ('已設為每 ' + intervalLabel + ' 更新') : ('目前已是每 ' + intervalLabel),
         2200,
         'success'
       );
@@ -1167,7 +1054,7 @@
   });
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js?v=10').then(function (reg) {
+    navigator.serviceWorker.register('sw.js?v=11').then(function (reg) {
       try { reg.update(); } catch (e) {}
     }).catch(function () {});
   }
