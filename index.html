@@ -137,6 +137,13 @@
     .card.static { cursor: default; }
     .card.static:active { transform: none; }
     .stock-row { display: flex; align-items: center; gap: 12px; }
+    .drag-handle {
+      flex: 0 0 32px; width: 32px; height: 40px; border: 0; border-radius: 10px;
+      background: transparent; color: var(--text-tertiary); font: inherit; font-size: 20px;
+      cursor: grab; touch-action: none; user-select: none;
+    }
+    .drag-handle:active { cursor: grabbing; color: var(--accent); }
+    .stock-row.dragging { opacity: 0.65; box-shadow: var(--shadow-md); }
     .stock-info { flex: 1; min-width: 0; }
     .stock-name { font-size: 15px; font-weight: 600; letter-spacing: -0.2px; white-space: normal; line-height: 1.3; overflow: hidden; text-overflow: ellipsis; }
     .stock-code { font-size: 12px; color: var(--text-secondary); margin-top: 2px; font-variant-numeric: tabular-nums; }
@@ -328,8 +335,9 @@
         <div class="card static">
           <div style="font-weight:600;margin-bottom:8px">重新整理間隔</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button class="pill interval-btn active" data-ms="0">永不</button>
             <button class="pill interval-btn" data-ms="30000">30 秒</button>
-            <button class="pill interval-btn active" data-ms="60000">1 分鐘</button>
+            <button class="pill interval-btn" data-ms="60000">1 分鐘</button>
             <button class="pill interval-btn" data-ms="300000">5 分鐘</button>
           </div>
         </div>
@@ -353,6 +361,6 @@
     <div class="modal-handle"></div>
     <div id="modal-content"></div>
   </div>
-  <script src="app.js?v=14" defer></script>
+  <script src="app.js?v=15" defer></script>
 </body>
 </html>
