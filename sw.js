@@ -1,4 +1,4 @@
-const CACHE = 'quote-pwa-v14';
+const CACHE = 'quote-pwa-v15';
 const ASSETS = [
   './',
   './index.html',
@@ -27,9 +27,12 @@ self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
 
+  if (url.origin === self.location.origin && url.pathname.startsWith('/api/')) {
+    e.respondWith(fetch(e.request));
+    return;
+  }
+
   if (
-    url.hostname.includes('gtimg.cn') ||
-    url.hostname.includes('smartbox') ||
     url.hostname.includes('supabase') ||
     url.hostname.includes('jsdelivr')
   ) {
