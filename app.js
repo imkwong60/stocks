@@ -1036,4 +1036,110 @@
     document.getElementById(id).addEventListener('click', function (e) {
       var row = e.target.closest('.stock-row[data-key]');
       if (row) openDetail(row.dataset.key, true);
-  
+    });
+  }
+  bindList('watchlist-content');
+  bindList('markets-content');
+  document.querySelectorAll('.interval-btn').forEach(function (btn) {
+    btn.classList.toggle('active', parseInt(btn.dataset.ms, 10) === pollInterval);
+    btn.addEventListener('click', function () {
+      var ms = parseInt(btn.dataset.ms, 10);
+      if (ALLOWED_INTERVALS.indexOf(ms) < 0) return;
+      document.querySelectorAll('.interval-btn').forEach(function (b) {
+        b.classList.remove('active', 'pop');
+      });
+      btn.classList.add('active', 'pop');
+      setTimeout(function () { btn.classList.remove('pop'); }, 360);
+      var changed = pollInterval !== ms;
+      pollInterval = ms;
+      lsSet(INTERVAL_KEY, String(pollInterval));
+      if (pollInterval) startPolling();
+      else if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+      try { if (navigator.vibrate) navigator.vibrate(10); } catch (e) {}
+      var intervalLabel = pollInterval === 0 ? '永不' : pollInterval < 60000 ?
+        (pollInterval / 1000) + ' 秒' : (pollInterval / 60000) + ' 分鐘';
+      showToast(
+        changed ? (pollInterval ? '已設為每 ' + intervalLabel + ' 更新' : '已關閉自動更新') :
+          (pollInterval ? '目前已是每 ' + intervalLabel : '目前自動更新為永不'),
+        2200,
+        'success'
+      );
+    });
+  });
+  document.getElementById('btn-clear').addEventListener('click', function () {
+    if (!window.confirm('確定清空全部自選？此操作無法復原。')) return;
+    watchlist = [];
+    saveWatchlist();
+    renderWatchlist(true);
+    renderPresets();
+    showToast('已清空自選');
+  });
+  document.getElementById('modal-overlay').addEventListener('click', closeModal);
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'visible') {
+      consecutiveFails = 0;
+      if (pollInterval) startPolling();
+      checkMarketSessionToasts();
+    } else if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+  });
+  window.addEventListener('online', function () {
+    isOnline = true; consecutiveFails = 0; setStatus(null);
+    if (pollInterval) startPolling();
+    showToast('已恢復連線');
+  });
+  window.addEventListener('offline', function () {
+    isOnline = false;
+    if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
+    setStatus('offline', '目前離線 · 顯示快取行情');
+  });
+
+  loadWatchlist();
+  renderPresets();
+  renderWatchlist(true);
+  document.getElementById('search-result').innerHTML =
+    '<div style="color:var(--text-tertiary);font-size:13px;padding:8px 4px">輸入代碼或名稱查看建議</div>';
+  renderAuthPanel();
+
+  // 若本機已綁定 Email，啟動時靜默嘗試載入雲端（不寄信）
+  if (sb && boundEmail) {
+    syncWatchlistDown({ toast: false });
+  }
+
+  if (!navigator.onLine) { isOnline = false; setStatus('offline', '目前離線 · 顯示快取行情'); }
+  startPolling();
+  checkMarketSessionToasts();
+  setInterval(checkMarketSessionToasts, 30000);
+
+  // 關閉前補一次上傳，避免 debounce 未觸發就離頁
+  window.addEventListener('pagehide', function () {
+    if (syncTimer) { clearTimeout(syncTimer); syncTimer = null; }
+    if (!sb || !boundEmail) return;
+    var id = cloudRowId();
+    if (!id) return;
+    try {
+      var payload = JSON.stringify({
+        id: id,
+        data: { items: watchlist },
+        updated_at: new Date().toISOString()
+      });
+      // keepalive 讓瀏覽器在卸載後仍盡力送出
+      fetch(SUPABASE_URL + '/rest/v1/notepad_data?on_conflict=id', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_ANON,
+          'Authorization': 'Bearer ' + SUPABASE_ANON,
+          'Prefer': 'resolution=merge-duplicates'
+        },
+        body: payload,
+        keepalive: true
+      }).catch(function () {});
+    } catch (e) {}
+  });
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js?v=12').then(function (reg) {
+      try { reg.update(); } catch (e) {}
+    }).catch(function () {});
+  }
+})();
