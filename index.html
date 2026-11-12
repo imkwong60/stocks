@@ -330,15 +330,14 @@
         </div>
         <div class="card static">
           <div style="font-weight:600;margin-bottom:8px">資料來源</div>
-          <div style="font-size:14px;color:var(--text-secondary);line-height:1.5">騰訊財經公開行情（script 注入 · 避開 CORS）<br />港股即時 · 美股延遲約 15 分鐘</div>
+          <div style="font-size:14px;color:var(--text-secondary);line-height:1.5">Twelve Data 行情服務<br />更新延遲依市場及方案而異</div>
         </div>
         <div class="card static">
           <div style="font-weight:600;margin-bottom:8px">重新整理間隔</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
-            <button class="pill interval-btn" data-ms="3000">3 秒</button>
-            <button class="pill interval-btn active" data-ms="5000">5 秒</button>
-            <button class="pill interval-btn" data-ms="10000">10 秒</button>
             <button class="pill interval-btn" data-ms="30000">30 秒</button>
+            <button class="pill interval-btn active" data-ms="60000">1 分鐘</button>
+            <button class="pill interval-btn" data-ms="300000">5 分鐘</button>
           </div>
         </div>
         <div class="card static">
@@ -361,6 +360,6 @@
     <div class="modal-handle"></div>
     <div id="modal-content"></div>
   </div>
-  <script src="app.js?v=12" defer></script>
+  <script src="app.js?v=14" defer></script>
 </body>
 </html>
