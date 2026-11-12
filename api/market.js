@@ -1,5 +1,8 @@
 const TWELVE_DATA_URL = 'https://api.twelvedata.com';
-const MAX_QUOTE_ITEMS = 30;
+const MAX_QUOTE_ITEMS = 8;
+const QUOTE_CACHE_TTL_MS = 25000;
+const MAX_QUOTE_CACHE_ENTRIES = 100;
+const quoteCache = new Map();
 
 function send(res, status, body) {
   res.setHeader('Cache-Control', 'no-store');
@@ -14,6 +17,7 @@ function getRequestBody(req) {
 
 function twelveSymbol(item) {
   if (item.market === 'hk') {
+    // Twelve Data uses 4 digits for HKEX; the UI and search results use 5.
     const hkSymbol = item.symbol.replace(/^0+/, '').padStart(4, '0');
     return item.symbol === 'HSI' ? 'HSI' : hkSymbol + ':HKEX';
   }
@@ -23,6 +27,7 @@ function twelveSymbol(item) {
 
 function canonicalSymbol(symbol) {
   const normalized = String(symbol || '').split(':')[0].replace(/^\./, '').toUpperCase();
+  if (normalized === 'INX') return 'SPX';
   return /^\d+$/.test(normalized) ? normalized.replace(/^0+/, '') : normalized;
 }
 
@@ -35,7 +40,7 @@ async function requestTwelveData(path, params, apiKey) {
   Object.keys(params).forEach((key) => url.searchParams.set(key, params[key]));
   url.searchParams.set('apikey', apiKey);
 
-  const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
+  const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
   let payload;
   try {
     payload = await response.json();
@@ -46,6 +51,35 @@ async function requestTwelveData(path, params, apiKey) {
     throw new Error(messageFrom(payload));
   }
   return payload;
+}
+
+function getCachedQuotes(symbols, apiKey) {
+  const key = symbols.slice().sort().join(',');
+  const now = Date.now();
+  const cached = quoteCache.get(key);
+  if (cached && cached.expiresAt > now) return cached.promise;
+  if (cached) quoteCache.delete(key);
+
+  quoteCache.forEach((entry, cacheKey) => {
+    if (entry.expiresAt <= now) quoteCache.delete(cacheKey);
+  });
+  if (quoteCache.size >= MAX_QUOTE_CACHE_ENTRIES) {
+    quoteCache.delete(quoteCache.keys().next().value);
+  }
+
+  const entry = { expiresAt: Infinity, promise: null };
+  entry.promise = requestTwelveData('/quote', { symbol: symbols.join(',') }, apiKey).then(
+    (payload) => {
+      entry.expiresAt = Date.now() + QUOTE_CACHE_TTL_MS;
+      return payload;
+    },
+    (error) => {
+      if (quoteCache.get(key) === entry) quoteCache.delete(key);
+      throw error;
+    }
+  );
+  quoteCache.set(key, entry);
+  return entry.promise;
 }
 
 function extractQuotes(payload) {
@@ -69,7 +103,7 @@ async function getQuotes(items, apiKey) {
     return { market: item.market, symbol: item.symbol.toUpperCase() };
   });
   const symbols = normalized.map(twelveSymbol);
-  const payload = await requestTwelveData('/quote', { symbol: symbols.join(',') }, apiKey);
+  const payload = await getCachedQuotes(symbols, apiKey);
   const returned = extractQuotes(payload);
   const quotes = [];
 
@@ -144,6 +178,9 @@ module.exports = async function handler(req, res) {
   } catch (error) {
     return send(res, 400, { error: 'Invalid request body' });
   }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return send(res, 400, { error: 'Invalid request body' });
+  }
 
   try {
     if (body.action === 'quotes') return send(res, 200, await getQuotes(body.items, apiKey));
@@ -152,6 +189,10 @@ module.exports = async function handler(req, res) {
   } catch (error) {
     const message = error && error.message ? error.message : 'Twelve Data request failed';
     const status = message === 'Invalid quote request' || message === 'Invalid search query' ? 400 : 502;
+    if (status !== 400) {
+      console.error('Market data request failed:', message);
+      return send(res, status, { error: '行情服務暫時無法使用' });
+    }
     return send(res, status, { error: message });
   }
 }
