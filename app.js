@@ -918,8 +918,14 @@
       '</div>' +
       '<div id="modal-events"><div style="margin-top:16px;color:var(--text-tertiary);font-size:13px">載入企業日程…</div></div>' +
       '<div class="modal-actions">' +
+      '<button class="pill primary" id="modal-live-refresh" type="button">更新即時報價</button>' +
       '<button class="pill ' + (inWatch ? '' : 'primary') + '" id="modal-toggle">' + (inWatch ? '移出自選' : '加入自選') + '</button>' +
-      '<button class="pill ghost" id="modal-close">關閉</button></div>';
+      '<button class="pill ghost" id="modal-close">關閉</button></div>' +
+      '<div style="margin-top:8px;font-size:11px;color:var(--text-tertiary);text-align:center">' +
+        (q.market === 'hk'
+          ? '即時來源：iTick（港股／恆生 · 免費約 5 次／分鐘）'
+          : '即時來源：Twelve Data（美股／美指）') +
+      '</div>';
     document.getElementById('modal-overlay').classList.add('show');
     modal.classList.add('show');
     document.body.classList.add('modal-open');
@@ -927,6 +933,64 @@
       var box = document.getElementById('modal-events');
       if (box) box.innerHTML = renderEventsHtml(ev);
     });
+    var liveBtn = document.getElementById('modal-live-refresh');
+    if (liveBtn) {
+      liveBtn.onclick = async function () {
+        if (liveBtn.disabled) return;
+        liveBtn.disabled = true;
+        var prevLabel = liveBtn.textContent;
+        liveBtn.textContent = '更新中…';
+        try {
+          var res = await fetch('/api/market', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            cache: 'no-store',
+            body: JSON.stringify({ action: 'live_quote', item: { market: q.market, symbol: q.symbol } })
+          });
+          var payload = await res.json();
+          if (!res.ok) throw new Error(payload.error || '即時查詢失敗');
+          var raw = payload.quote;
+          if (!raw || raw.close == null) throw new Error('無報價資料');
+          var key = makeKey(q.market, q.symbol);
+          var prevQ = quotes[key] || q;
+          var market = q.market;
+          quotes[key] = {
+            key: key,
+            market: market,
+            symbol: q.symbol,
+            name: lookupName(market, q.symbol, raw.name || prevQ.name || q.symbol),
+            price: num(raw.close),
+            prevClose: num(raw.previous_close),
+            open: num(raw.open),
+            high: num(raw.high),
+            low: num(raw.low),
+            volume: num(raw.volume) || 0,
+            change: num(raw.change),
+            changePct: num(raw.percent_change),
+            currency: raw.currency || (market === 'hk' ? 'HKD' : 'USD'),
+            time: raw.datetime || new Date().toISOString(),
+            source: raw.source || (market === 'hk' ? 'itick' : 'twelve')
+          };
+          if (quotes[key].change == null && quotes[key].price != null && quotes[key].prevClose != null) {
+            quotes[key].change = quotes[key].price - quotes[key].prevClose;
+          }
+          if (quotes[key].changePct == null && quotes[key].change != null && quotes[key].prevClose) {
+            quotes[key].changePct = quotes[key].change / quotes[key].prevClose * 100;
+          }
+          updateModalPrices();
+          if (currentPage === 'watchlist') renderWatchlist(false);
+          if (currentPage === 'markets') renderMarkets(false);
+          markUpdatedAt();
+          var srcLabel = market === 'hk' ? 'iTick' : 'Twelve Data';
+          showToast('已更新即時報價（' + srcLabel + '）', 2200, 'success');
+        } catch (err) {
+          quoteErrorToast(err, '即時報價更新失敗');
+        } finally {
+          liveBtn.disabled = false;
+          liveBtn.textContent = prevLabel || '更新即時報價';
+        }
+      };
+    }
     document.getElementById('modal-toggle').onclick = function () {
       toggleWatch(q.market, q.symbol);
       updateModalPrices(); // 不重建，保留滾動
