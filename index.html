@@ -7,7 +7,7 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="default" />
   <meta name="theme-color" content="#f4efe6" />
   <meta name="description" content="股票本本 · 港股美股即時報價 PWA" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; object-src 'none'; base-uri 'self'; form-action 'self'" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://qt.gtimg.cn https://smartbox.gtimg.cn https://*.supabase.co wss://*.supabase.co; object-src 'none'; base-uri 'self'; form-action 'self'" />
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" type="image/png" href="icons/icon-192.png" />
   <link rel="apple-touch-icon" href="icons/icon-180.png" />
@@ -331,7 +331,7 @@
         </div>
         <div class="card static">
           <div style="font-weight:600;margin-bottom:8px">資料來源</div>
-          <div style="font-size:14px;color:var(--text-secondary);line-height:1.5">港股／恆生：iTick<br />美股：Twelve Data<br />更新延遲依市場及方案而異</div>
+          <div style="font-size:14px;color:var(--text-secondary);line-height:1.5">報價：騰訊財經 qt.gtimg.cn<br />企業日程：Yahoo Finance（除淨／派息／拆股）<br />行情可能有延遲</div>
         </div>
         <div class="card static">
           <div style="font-weight:600;margin-bottom:8px">重新整理間隔</div>
@@ -361,6 +361,6 @@
     <div class="modal-handle"></div>
     <div id="modal-content"></div>
   </div>
-  <script src="app.js?v=23" defer></script>
+  <script src="app.js?v=27" defer></script>
 </body>
 </html>
