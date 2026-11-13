@@ -4,6 +4,40 @@ const QUOTE_CACHE_TTL_MS = 25000;
 const MAX_QUOTE_CACHE_ENTRIES = 100;
 const quoteCache = new Map();
 
+// 簡易 IP 限流（每實例記憶體；serverless 冷啟動會清空，仍可擋住單實例連打）
+const IP_WINDOW_MS = 60000;
+const IP_MAX_HITS = 40;
+const ipHits = new Map();
+
+function clientIp(req) {
+  const xf = req.headers && (req.headers['x-forwarded-for'] || req.headers['x-real-ip']);
+  if (typeof xf === 'string' && xf.trim()) return xf.split(',')[0].trim();
+  return (req.socket && req.socket.remoteAddress) || 'unknown';
+}
+
+function checkIpRateLimit(req) {
+  const ip = clientIp(req);
+  const now = Date.now();
+  let hits = ipHits.get(ip) || [];
+  hits = hits.filter((t) => t > now - IP_WINDOW_MS);
+  if (hits.length >= IP_MAX_HITS) {
+    const err = new Error('Too many requests');
+    err.code = 'IP_RATE_LIMIT';
+    err.waitMs = hits.length ? hits[0] + IP_WINDOW_MS - now : IP_WINDOW_MS;
+    throw err;
+  }
+  hits.push(now);
+  ipHits.set(ip, hits);
+  // 偶爾清理過大 map
+  if (ipHits.size > 5000) {
+    for (const [key, arr] of ipHits) {
+      const kept = arr.filter((t) => t > now - IP_WINDOW_MS);
+      if (!kept.length) ipHits.delete(key);
+      else ipHits.set(key, kept);
+    }
+  }
+}
+
 function send(res, status, body) {
   res.setHeader('Cache-Control', 'no-store');
   res.status(status).json(body);
@@ -57,7 +91,9 @@ function getCachedQuotes(symbols, apiKey) {
   const key = symbols.slice().sort().join(',');
   const now = Date.now();
   const cached = quoteCache.get(key);
-  if (cached && cached.expiresAt > now) return cached.promise;
+  if (cached && cached.expiresAt > now) {
+    return { promise: cached.promise, fromCache: true };
+  }
   if (cached) quoteCache.delete(key);
 
   quoteCache.forEach((entry, cacheKey) => {
@@ -79,7 +115,7 @@ function getCachedQuotes(symbols, apiKey) {
     }
   );
   quoteCache.set(key, entry);
-  return entry.promise;
+  return { promise: entry.promise, fromCache: false };
 }
 
 function extractQuotes(payload) {
@@ -103,7 +139,8 @@ async function getQuotes(items, apiKey) {
     return { market: item.market, symbol: item.symbol.toUpperCase() };
   });
   const symbols = normalized.map(twelveSymbol);
-  const payload = await getCachedQuotes(symbols, apiKey);
+  const cacheResult = getCachedQuotes(symbols, apiKey);
+  const payload = await cacheResult.promise;
   const returned = extractQuotes(payload);
   const quotes = [];
 
@@ -130,7 +167,7 @@ async function getQuotes(items, apiKey) {
     });
   });
   if (!quotes.length) throw new Error(messageFrom(payload));
-  return { quotes };
+  return { quotes, cached: !!cacheResult.fromCache };
 }
 
 async function searchSymbols(query, apiKey) {
@@ -167,6 +204,16 @@ module.exports = async function handler(req, res) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST');
     return send(res, 405, { error: 'Method not allowed' });
+  }
+
+  try {
+    checkIpRateLimit(req);
+  } catch (error) {
+    if (error && error.code === 'IP_RATE_LIMIT') {
+      res.setHeader('Retry-After', String(Math.ceil((error.waitMs || 60000) / 1000)));
+      return send(res, 429, { error: '請求過於頻繁，請稍後再試' });
+    }
+    throw error;
   }
 
   const apiKey = process.env.TWELVE_DATA_API_KEY;
