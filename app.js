@@ -14,7 +14,7 @@
   // 與 Vercel VAPID_PUBLIC_KEY 一致（私鑰只放伺服器）
   var VAPID_PUBLIC_KEY = 'BDwJnz6kxYCrBCyJE47Zk_7SA-FTmyLWw5LVsvnPVdU12gyZDyUOnIoqss0Y_QClvrzYhvb1sMHzesJ8TOXAFqI';
 
-  var MAX_BATCH_SIZE = 20; // 騰訊批量上限（一次刷新）
+  var MAX_BATCH_SIZE = 20; // 騰訊批量上限（一次刷新）1
 
   function lsGet(k, fallback) {
     try { var v = localStorage.getItem(k); return v == null ? fallback : v; } catch (e) { return fallback; }
