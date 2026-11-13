@@ -1008,6 +1008,7 @@
     modal.classList.add('show');
     document.body.classList.add('modal-open');
     loadCorporateEvents(q.market, q.symbol).then(function (ev) {
+      if (selectedKey !== key) return; // 防競態：已切到其他股票／已關閉
       var box = document.getElementById('modal-events');
       if (box) box.innerHTML = renderEventsHtml(ev);
     });
@@ -1196,9 +1197,11 @@
       handle: handle,
       row: row,
       pointerId: e.pointerId,
-      originalKeys: watchlist.map(function (item) { return item.key; })
+      originalKeys: watchlist.map(function (item) { return item.key; }),
+      lastTarget: null
     };
     row.classList.add('dragging');
+    try { if (navigator.vibrate) navigator.vibrate(8); } catch (err) {}
     if (handle.setPointerCapture) handle.setPointerCapture(e.pointerId);
   });
   watchlistEl.addEventListener('pointermove', function (e) {
@@ -1208,13 +1211,25 @@
     target = target && target.closest('.stock-row[data-key]');
     if (!target || target === watchlistDrag.row || target.parentNode !== watchlistEl) return;
     var rect = target.getBoundingClientRect();
-    watchlistEl.insertBefore(watchlistDrag.row, e.clientY < rect.top + rect.height / 2 ? target : target.nextSibling);
+    var before = e.clientY < rect.top + rect.height / 2;
+    watchlistEl.insertBefore(watchlistDrag.row, before ? target : target.nextSibling);
+    if (watchlistDrag.lastTarget !== target) {
+      watchlistDrag.lastTarget = target;
+      target.classList.remove('drag-shift');
+      // restart animation
+      void target.offsetWidth;
+      target.classList.add('drag-shift');
+      setTimeout(function () { target.classList.remove('drag-shift'); }, 280);
+      try { if (navigator.vibrate) navigator.vibrate(4); } catch (err) {}
+    }
   });
   function finishWatchlistDrag(commit) {
     if (!watchlistDrag) return;
     var drag = watchlistDrag;
     watchlistDrag = null;
     drag.row.classList.remove('dragging');
+    drag.row.classList.add('drag-drop');
+    setTimeout(function () { drag.row.classList.remove('drag-drop'); }, 320);
     if (!commit) {
       renderWatchlist(true);
       return;
@@ -1228,6 +1243,7 @@
         ordered.some(function (item, index) { return item.key !== drag.originalKeys[index]; })) {
       watchlist = ordered;
       saveWatchlist();
+      try { if (navigator.vibrate) navigator.vibrate([6, 20, 6]); } catch (err) {}
     }
   }
   watchlistEl.addEventListener('pointerup', function (e) {
