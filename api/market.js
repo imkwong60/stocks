@@ -1,10 +1,10 @@
 const TWELVE_DATA_URL = 'https://api.twelvedata.com';
+const ITICK_URL = 'https://api.itick.org';
 const MAX_QUOTE_ITEMS = 8;
 const QUOTE_CACHE_TTL_MS = 25000;
 const MAX_QUOTE_CACHE_ENTRIES = 100;
 const quoteCache = new Map();
 
-// 簡易 IP 限流（每實例記憶體；serverless 冷啟動會清空，仍可擋住單實例連打）
 const IP_WINDOW_MS = 60000;
 const IP_MAX_HITS = 40;
 const ipHits = new Map();
@@ -28,7 +28,6 @@ function checkIpRateLimit(req) {
   }
   hits.push(now);
   ipHits.set(ip, hits);
-  // 偶爾清理過大 map
   if (ipHits.size > 5000) {
     for (const [key, arr] of ipHits) {
       const kept = arr.filter((t) => t > now - IP_WINDOW_MS);
@@ -49,14 +48,8 @@ function getRequestBody(req) {
   return {};
 }
 
-function twelveSymbol(item) {
-  if (item.market === 'hk') {
-    // Twelve Data uses 4 digits for HKEX; the UI and search results use 5.
-    const hkSymbol = item.symbol.replace(/^0+/, '').padStart(4, '0');
-    return item.symbol === 'HSI' ? 'HSI' : hkSymbol + ':HKEX';
-  }
-  if (item.symbol === 'INX' || item.symbol === '.INX') return 'SPX';
-  return item.symbol.replace(/^\./, '');
+function messageFrom(payload) {
+  return (payload && (payload.message || payload.msg)) || 'Upstream request failed';
 }
 
 function canonicalSymbol(symbol) {
@@ -65,34 +58,187 @@ function canonicalSymbol(symbol) {
   return /^\d+$/.test(normalized) ? normalized.replace(/^0+/, '') : normalized;
 }
 
-function messageFrom(payload) {
-  return payload && (payload.message || payload.msg) || 'Twelve Data request failed';
+function itickHkCode(symbol) {
+  if (symbol === 'HSI') return 'HSI';
+  const s = String(symbol || '').replace(/^0+/, '') || '0';
+  return s;
+}
+
+function twelveSymbol(item) {
+  if (item.symbol === 'INX' || item.symbol === '.INX') return 'SPX';
+  return String(item.symbol).replace(/^\./, '');
+}
+
+async function fetchJson(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    signal: options.signal || AbortSignal.timeout(8000)
+  });
+  let payload;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    throw new Error('Upstream returned an invalid response');
+  }
+  return { response, payload };
 }
 
 async function requestTwelveData(path, params, apiKey) {
   const url = new URL(TWELVE_DATA_URL + path);
   Object.keys(params).forEach((key) => url.searchParams.set(key, params[key]));
   url.searchParams.set('apikey', apiKey);
-
-  const response = await fetch(url, { signal: AbortSignal.timeout(8000) });
-  let payload;
-  try {
-    payload = await response.json();
-  } catch (error) {
-    throw new Error('Twelve Data returned an invalid response');
-  }
+  const { response, payload } = await fetchJson(url.toString());
   if (!response.ok || (payload && payload.status === 'error')) {
     throw new Error(messageFrom(payload));
   }
   return payload;
 }
 
-function getCachedQuotes(symbols, apiKey) {
-  const key = symbols.slice().sort().join(',');
+function extractTwelveQuotes(payload) {
+  if (payload && payload.symbol && payload.close != null) return [payload];
+  if (Array.isArray(payload && payload.data)) return payload.data;
+  if (!payload || typeof payload !== 'object') return [];
+  return Object.keys(payload)
+    .map((key) => payload[key])
+    .filter((quote) => quote && typeof quote === 'object' && quote.symbol && quote.close != null);
+}
+
+async function getTwelveQuotes(items, apiKey) {
+  const symbols = items.map(twelveSymbol);
+  const payload = await requestTwelveData('/quote', { symbol: symbols.join(',') }, apiKey);
+  const returned = extractTwelveQuotes(payload);
+  const quotes = [];
+  items.forEach((item, index) => {
+    const requested = canonicalSymbol(symbols[index]);
+    const quote = returned.find((c) => canonicalSymbol(c.symbol) === requested);
+    if (!quote || quote.close == null) return;
+    quotes.push({
+      market: 'us',
+      symbol: item.symbol,
+      name: quote.name || quote.instrument_name || item.symbol,
+      close: quote.close,
+      previous_close: quote.previous_close,
+      change: quote.change,
+      percent_change: quote.percent_change,
+      open: quote.open,
+      high: quote.high,
+      low: quote.low,
+      volume: quote.volume,
+      currency: quote.currency || 'USD',
+      datetime: quote.datetime || quote.timestamp || ''
+    });
+  });
+  return quotes;
+}
+
+async function requestItick(path, params, apiKey) {
+  const url = new URL(ITICK_URL + path);
+  Object.keys(params).forEach((key) => {
+    if (params[key] != null && params[key] !== '') url.searchParams.set(key, params[key]);
+  });
+  const { response, payload } = await fetchJson(url.toString(), {
+    headers: {
+      accept: 'application/json',
+      token: apiKey
+    }
+  });
+  if (!response.ok) {
+    throw new Error(messageFrom(payload) || `iTick HTTP ${response.status}`);
+  }
+  if (payload && payload.code !== 0 && payload.code !== '0') {
+    throw new Error(payload.msg || payload.message || 'iTick request failed');
+  }
+  return payload;
+}
+
+function mapItickQuote(raw, market, symbol) {
+  if (!raw || raw.ld == null) return null;
+  const close = raw.ld;
+  const prev = raw.p;
+  let change = raw.ch;
+  if (change == null && close != null && prev != null) change = close - prev;
+  let percent = raw.chp;
+  if (percent == null && change != null && prev) percent = (change / prev) * 100;
+  let datetime = '';
+  if (raw.t) {
+    try {
+      datetime = new Date(raw.t).toISOString();
+    } catch (e) {
+      datetime = String(raw.t);
+    }
+  }
+  return {
+    market,
+    symbol,
+    name: symbol,
+    close,
+    previous_close: prev,
+    change,
+    percent_change: percent,
+    open: raw.o,
+    high: raw.h,
+    low: raw.l,
+    volume: raw.v,
+    currency: market === 'hk' ? 'HKD' : 'USD',
+    datetime
+  };
+}
+
+async function getItickHkQuotes(items, apiKey) {
+  const stocks = [];
+  const indices = [];
+  items.forEach((item) => {
+    if (item.symbol === 'HSI') indices.push(item);
+    else stocks.push(item);
+  });
+
+  const quotes = [];
+
+  if (stocks.length) {
+    const codes = stocks.map((item) => itickHkCode(item.symbol)).join(',');
+    const payload = await requestItick('/stock/quotes', { region: 'HK', codes }, apiKey);
+    const data = (payload && payload.data) || {};
+    stocks.forEach((item) => {
+      const code = itickHkCode(item.symbol);
+      const raw = data[code] || data[item.symbol] || data[String(item.symbol).padStart(5, '0')];
+      const mapped = mapItickQuote(raw, 'hk', item.symbol);
+      if (mapped) quotes.push(mapped);
+    });
+  }
+
+  if (indices.length) {
+    const codes = indices.map((item) => item.symbol).join(',');
+    let payload = null;
+    try {
+      payload = await requestItick('/indices/quotes', { region: 'HK', codes }, apiKey);
+    } catch (e) {
+      payload = await requestItick('/indices/quotes', { region: 'GB', codes }, apiKey);
+    }
+    const data = (payload && payload.data) || {};
+    indices.forEach((item) => {
+      const raw = data[item.symbol] || data.HSI;
+      const mapped = mapItickQuote(raw, 'hk', item.symbol);
+      if (mapped) quotes.push(mapped);
+    });
+  }
+
+  return quotes;
+}
+
+function cacheKeyFor(items) {
+  return items
+    .map((i) => `${i.market}:${i.symbol}`)
+    .sort()
+    .join(',');
+}
+
+async function getQuotesCached(items, fetchFn) {
+  const key = cacheKeyFor(items);
   const now = Date.now();
   const cached = quoteCache.get(key);
   if (cached && cached.expiresAt > now) {
-    return { promise: cached.promise, fromCache: true };
+    const payload = await cached.promise;
+    return { ...payload, cached: true };
   }
   if (cached) quoteCache.delete(key);
 
@@ -104,7 +250,7 @@ function getCachedQuotes(symbols, apiKey) {
   }
 
   const entry = { expiresAt: Infinity, promise: null };
-  entry.promise = requestTwelveData('/quote', { symbol: symbols.join(',') }, apiKey).then(
+  entry.promise = fetchFn().then(
     (payload) => {
       entry.expiresAt = Date.now() + QUOTE_CACHE_TTL_MS;
       return payload;
@@ -115,19 +261,11 @@ function getCachedQuotes(symbols, apiKey) {
     }
   );
   quoteCache.set(key, entry);
-  return { promise: entry.promise, fromCache: false };
+  const payload = await entry.promise;
+  return { ...payload, cached: false };
 }
 
-function extractQuotes(payload) {
-  if (payload && payload.symbol) return [payload];
-  if (Array.isArray(payload && payload.data)) return payload.data;
-  if (!payload || typeof payload !== 'object') return [];
-  return Object.keys(payload)
-    .map((key) => payload[key])
-    .filter((quote) => quote && typeof quote === 'object' && quote.symbol);
-}
-
-async function getQuotes(items, apiKey) {
+async function getQuotes(items, keys) {
   if (!Array.isArray(items) || items.length < 1 || items.length > MAX_QUOTE_ITEMS) {
     throw new Error('Invalid quote request');
   }
@@ -138,46 +276,51 @@ async function getQuotes(items, apiKey) {
     }
     return { market: item.market, symbol: item.symbol.toUpperCase() };
   });
-  const symbols = normalized.map(twelveSymbol);
-  const cacheResult = getCachedQuotes(symbols, apiKey);
-  const payload = await cacheResult.promise;
-  const returned = extractQuotes(payload);
-  const quotes = [];
 
-  normalized.forEach((item, index) => {
-    const requestedSymbol = canonicalSymbol(symbols[index]);
-    const quote = returned.find((candidate) => {
-      return canonicalSymbol(candidate.symbol) === requestedSymbol;
-    });
-    if (!quote || quote.close == null) return;
-    quotes.push({
-      market: item.market,
-      symbol: item.symbol,
-      name: quote.name || quote.instrument_name || item.symbol,
-      close: quote.close,
-      previous_close: quote.previous_close,
-      change: quote.change,
-      percent_change: quote.percent_change,
-      open: quote.open,
-      high: quote.high,
-      low: quote.low,
-      volume: quote.volume,
-      currency: quote.currency,
-      datetime: quote.datetime || quote.timestamp || ''
-    });
+  const hkItems = normalized.filter((i) => i.market === 'hk');
+  const usItems = normalized.filter((i) => i.market === 'us');
+
+  if (hkItems.length && !keys.itick) {
+    throw new Error('iTick API key is not configured');
+  }
+  if (usItems.length && !keys.twelve) {
+    throw new Error('Twelve Data API key is not configured');
+  }
+
+  return getQuotesCached(normalized, async () => {
+    const tasks = [];
+    if (hkItems.length) tasks.push(getItickHkQuotes(hkItems, keys.itick));
+    if (usItems.length) tasks.push(getTwelveQuotes(usItems, keys.twelve));
+    const parts = await Promise.all(tasks);
+    const quotes = parts.flat();
+    if (!quotes.length) throw new Error('No quotes returned');
+    return { quotes };
   });
-  if (!quotes.length) throw new Error(messageFrom(payload));
-  return { quotes, cached: !!cacheResult.fromCache };
 }
 
-async function searchSymbols(query, apiKey) {
+async function searchSymbols(query, keys) {
   if (typeof query !== 'string' || !query.trim() || query.length > 80) {
     throw new Error('Invalid search query');
   }
+  const q = query.trim();
+
+  if (/^\d{1,5}$/.test(q)) {
+    const symbol = q.replace(/^0+/, '').padStart(5, '0');
+    return {
+      results: [{
+        market: 'hk',
+        symbol,
+        name: symbol,
+        key: 'hk:' + symbol
+      }]
+    };
+  }
+
+  if (!keys.twelve) throw new Error('Twelve Data API key is not configured');
   const payload = await requestTwelveData('/symbol_search', {
-    symbol: query.trim(),
+    symbol: q,
     outputsize: '20'
-  }, apiKey);
+  }, keys.twelve);
   const data = Array.isArray(payload.data) ? payload.data : [];
   const results = data.map((item) => {
     const exchange = String(item.exchange || '').toUpperCase();
@@ -216,8 +359,13 @@ module.exports = async function handler(req, res) {
     throw error;
   }
 
-  const apiKey = process.env.TWELVE_DATA_API_KEY;
-  if (!apiKey) return send(res, 500, { error: 'Twelve Data API key is not configured' });
+  const keys = {
+    twelve: process.env.TWELVE_DATA_API_KEY,
+    itick: process.env.ITICK_API_KEY
+  };
+  if (!keys.twelve && !keys.itick) {
+    return send(res, 500, { error: 'API keys are not configured' });
+  }
 
   let body;
   try {
@@ -230,11 +378,11 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    if (body.action === 'quotes') return send(res, 200, await getQuotes(body.items, apiKey));
-    if (body.action === 'search') return send(res, 200, await searchSymbols(body.query, apiKey));
+    if (body.action === 'quotes') return send(res, 200, await getQuotes(body.items, keys));
+    if (body.action === 'search') return send(res, 200, await searchSymbols(body.query, keys));
     return send(res, 400, { error: 'Invalid action' });
   } catch (error) {
-    const message = error && error.message ? error.message : 'Twelve Data request failed';
+    const message = error && error.message ? error.message : 'Market data request failed';
     const status = message === 'Invalid quote request' || message === 'Invalid search query' ? 400 : 502;
     if (status !== 400) {
       console.error('Market data request failed:', message);
@@ -242,4 +390,4 @@ module.exports = async function handler(req, res) {
     }
     return send(res, status, { error: message });
   }
-}
+};
