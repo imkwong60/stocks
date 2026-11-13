@@ -6,7 +6,7 @@
 const QT_URL = 'https://qt.gtimg.cn/q=';
 const SMARTBOX_URL = 'https://smartbox.gtimg.cn/s3/';
 const YAHOO_CHART = 'https://query1.finance.yahoo.com/v8/finance/chart/';
-const MAX_QUOTE_ITEMS = 20;
+const MAX_QUOTE_ITEMS = 40;
 const QUOTE_CACHE_TTL_MS = 15000;
 const EVENT_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h
 const MAX_QUOTE_CACHE_ENTRIES = 100;
@@ -14,7 +14,7 @@ const quoteCache = new Map();
 const eventCache = new Map();
 
 const IP_WINDOW_MS = 60000;
-const IP_MAX_HITS = 60;
+const IP_MAX_HITS = 300;
 const ipHits = new Map();
 
 function clientIp(req) {
@@ -287,6 +287,128 @@ async function fetchYahooEvents(item) {
   return payload;
 }
 
+
+/** 即時報價：港股／HSI → iTick；美股／美指 → Twelve Data */
+async function getItickRealtime(item) {
+  const apiKey = process.env.ITICK_API_KEY;
+  if (!apiKey) throw new Error('未設定 ITICK_API_KEY');
+  if (!item || item.market !== 'hk' || typeof item.symbol !== 'string') {
+    throw new Error('僅支援港股即時報價');
+  }
+  const symbol = item.symbol.toUpperCase();
+  const base = (process.env.ITICK_API_BASE || 'https://api-free.itick.org').replace(/\/$/, '');
+  const isIndex = symbol === 'HSI';
+  const code = isIndex ? 'HSI' : (String(symbol).replace(/\D/g, '').replace(/^0+/, '') || '0');
+  const path = isIndex ? '/indices/quote' : '/stock/quote';
+  const url = base + path + '?region=HK&code=' + encodeURIComponent(code);
+
+  const response = await fetch(url, {
+    headers: { accept: 'application/json', token: apiKey },
+    signal: AbortSignal.timeout(8000)
+  });
+  let payload;
+  try { payload = await response.json(); } catch (e) { throw new Error('iTick 回傳無效'); }
+  if (!response.ok) {
+    throw new Error((payload && (payload.msg || payload.message)) || ('iTick HTTP ' + response.status));
+  }
+  if (payload && payload.code !== 0 && payload.code !== '0') {
+    throw new Error(payload.msg || payload.message || 'iTick 查詢失敗');
+  }
+  const raw = payload.data || {};
+  if (raw.ld == null) throw new Error('iTick 無報價資料');
+  const close = Number(raw.ld);
+  const prev = raw.p != null ? Number(raw.p) : null;
+  let change = raw.ch != null ? Number(raw.ch) : null;
+  if (change == null && prev != null) change = close - prev;
+  let percent = raw.chp != null ? Number(raw.chp) : null;
+  if (percent == null && change != null && prev) percent = (change / prev) * 100;
+  let datetime = '';
+  if (raw.t) {
+    try { datetime = new Date(raw.t).toISOString(); } catch (e) { datetime = String(raw.t); }
+  }
+  return {
+    quote: {
+      market: 'hk',
+      symbol: symbol,
+      name: symbol,
+      close,
+      previous_close: prev,
+      change,
+      percent_change: percent,
+      open: raw.o != null ? Number(raw.o) : null,
+      high: raw.h != null ? Number(raw.h) : null,
+      low: raw.l != null ? Number(raw.l) : null,
+      volume: raw.v != null ? Number(raw.v) : 0,
+      currency: 'HKD',
+      datetime,
+      source: 'itick'
+    }
+  };
+}
+
+function twelveLiveSymbol(item) {
+  const sym = String(item.symbol || '').toUpperCase();
+  if (sym === 'INX' || sym === '.INX') return 'SPX';
+  if (sym === 'DJI' || sym === '.DJI') return 'DJI';
+  if (sym === 'IXIC' || sym === '.IXIC') return 'IXIC';
+  return sym.replace(/^\./, '');
+}
+
+async function getTwelveRealtime(item) {
+  const apiKey = process.env.TWELVE_DATA_API_KEY;
+  if (!apiKey) throw new Error('未設定 TWELVE_DATA_API_KEY');
+  if (!item || item.market !== 'us' || typeof item.symbol !== 'string') {
+    throw new Error('僅支援美股即時報價');
+  }
+  const symbol = item.symbol.toUpperCase();
+  const tsym = twelveLiveSymbol(item);
+  const url = 'https://api.twelvedata.com/quote?symbol=' + encodeURIComponent(tsym) + '&apikey=' + encodeURIComponent(apiKey);
+  const response = await fetch(url, {
+    headers: { Accept: 'application/json' },
+    signal: AbortSignal.timeout(10000)
+  });
+  let payload;
+  try { payload = await response.json(); } catch (e) { throw new Error('Twelve Data 回傳無效'); }
+  if (!response.ok || (payload && payload.status === 'error')) {
+    throw new Error((payload && (payload.message || payload.msg)) || ('Twelve Data HTTP ' + response.status));
+  }
+  if (payload.close == null) throw new Error('Twelve Data 無報價資料');
+  const close = Number(payload.close);
+  const prev = payload.previous_close != null ? Number(payload.previous_close) : null;
+  let change = payload.change != null ? Number(payload.change) : null;
+  if (change == null && prev != null) change = close - prev;
+  let percent = payload.percent_change != null ? Number(payload.percent_change) : null;
+  if (percent == null && change != null && prev) percent = (change / prev) * 100;
+  return {
+    quote: {
+      market: 'us',
+      symbol: symbol,
+      name: payload.name || symbol,
+      close,
+      previous_close: prev,
+      change,
+      percent_change: percent,
+      open: payload.open != null ? Number(payload.open) : null,
+      high: payload.high != null ? Number(payload.high) : null,
+      low: payload.low != null ? Number(payload.low) : null,
+      volume: payload.volume != null ? Number(payload.volume) : 0,
+      currency: payload.currency || 'USD',
+      datetime: payload.datetime || payload.timestamp || '',
+      source: 'twelve'
+    }
+  };
+}
+
+/** 統一即時：hk → iTick，us → Twelve Data */
+async function getLiveQuote(item) {
+  if (!item || (item.market !== 'hk' && item.market !== 'us') || typeof item.symbol !== 'string') {
+    throw new Error('Invalid live quote request');
+  }
+  const normalized = { market: item.market, symbol: String(item.symbol).toUpperCase() };
+  if (normalized.market === 'hk') return getItickRealtime(normalized);
+  return getTwelveRealtime(normalized);
+}
+
 async function getEvents(items) {
   if (!Array.isArray(items) || items.length < 1 || items.length > 10) {
     throw new Error('Invalid events request');
@@ -411,6 +533,10 @@ module.exports = async function handler(req, res) {
     if (body.action === 'quotes') return send(res, 200, await getQuotes(body.items));
     if (body.action === 'search') return send(res, 200, await searchSymbols(body.query));
     if (body.action === 'events') return send(res, 200, await getEvents(body.items));
+    if (body.action === 'itick_quote' || body.action === 'twelve_quote' || body.action === 'live_quote') {
+      if (!body.item) return send(res, 400, { error: 'Missing item' });
+      return send(res, 200, await getLiveQuote(body.item));
+    }
     return send(res, 400, { error: 'Invalid action' });
   } catch (error) {
     const message = error && error.message ? error.message : 'Market data request failed';
