@@ -7,12 +7,7 @@
   var INTERVAL_KEY = 'quote_interval_v1';
   var SESSION_TOAST_KEY = 'quote_session_toasts_v1';
   var QUOTE_ROTATION_KEY = 'quote_rotation_offset_v1';
-  var QUOTE_REQUEST_LOG_KEY = 'quote_request_log_v1';
-  var QUOTE_DAILY_USAGE_KEY = 'quote_daily_usage_v1';
-  var MAX_QUOTE_CREDITS_PER_MINUTE = 8;
-  var MAX_BATCH_CREDITS = 6; // 批量刷新留 2 credits 給詳情／加入
-  var MAX_QUOTE_CREDITS_PER_DAY = 800;
-  var QUOTE_WINDOW_MS = 60000;
+  var MAX_BATCH_SIZE = 20; // 騰訊批量上限（一次刷新）
 
   function lsGet(k, fallback) {
     try { var v = localStorage.getItem(k); return v == null ? fallback : v; } catch (e) { return fallback; }
@@ -22,15 +17,6 @@
   }
   function lsDel(k) {
     try { localStorage.removeItem(k); } catch (e) {}
-  }
-  function utcDayKey(timestamp) { return new Date(timestamp).toISOString().slice(0, 10); }
-  function loadDailyCreditState() {
-    try {
-      var state = JSON.parse(lsGet(QUOTE_DAILY_USAGE_KEY, 'null'));
-      if (state && state.day === utcDayKey(Date.now()) &&
-          typeof state.credits === 'number' && state.credits >= 0) return state;
-    } catch (e) {}
-    return { day: utcDayKey(Date.now()), credits: 0 };
   }
 
   var SUPABASE_URL = 'https://wanknivxcsrasdkkxmfr.supabase.co';
@@ -108,7 +94,6 @@
   var selectedKey = null;
   var inFlight = false;
   var quoteRequestQueue = Promise.resolve();
-  var dailyCreditState = loadDailyCreditState();
   var consecutiveFails = 0;
   var updatedAtTimer = null;
   var isOnline = navigator.onLine;
@@ -476,105 +461,22 @@
     };
   }
 
-  function loadRequestLog() {
-    try {
-      var log = JSON.parse(lsGet(QUOTE_REQUEST_LOG_KEY, '[]') || '[]');
-      if (!Array.isArray(log)) return [];
-      var cutoff = Date.now() - QUOTE_WINDOW_MS;
-      return log.filter(function (x) {
-        return x && typeof x.t === 'number' && typeof x.credits === 'number' && x.t > cutoff;
-      });
-    } catch (e) {
-      return [];
-    }
-  }
-
-  function saveRequestLog(log) {
-    lsSet(QUOTE_REQUEST_LOG_KEY, JSON.stringify(log));
-  }
-
-  /** 滑動窗口內已用 credits，以及若超額需等待的毫秒數 */
-  function slidingWindowUsage(extraCredits) {
-    var now = Date.now();
-    var log = loadRequestLog();
-    var used = log.reduce(function (s, x) { return s + x.credits; }, 0);
-    if (used + extraCredits <= MAX_QUOTE_CREDITS_PER_MINUTE) {
-      return { used: used, waitMs: 0, log: log };
-    }
-    // 找出最早一筆，等它滑出窗口後才有空位
-    var waitMs = QUOTE_WINDOW_MS;
-    if (log.length) {
-      var oldest = log[0];
-      for (var i = 1; i < log.length; i++) {
-        if (log[i].t < oldest.t) oldest = log[i];
-      }
-      waitMs = Math.max(0, oldest.t + QUOTE_WINDOW_MS - now);
-    }
-    return { used: used, waitMs: waitMs, log: log };
-  }
-
   function fetchQuotes(items) {
     if (!items.length) return Promise.resolve({});
-    if (items.length > MAX_QUOTE_CREDITS_PER_MINUTE) {
-      return Promise.reject(new Error('單次行情查詢最多 8 檔'));
-    }
-
-    function reserveAndFetch() {
-      // 鎖內重讀日額度，避免跨分頁記憶體副本不同步
-      dailyCreditState = loadDailyCreditState();
-      var dailyRemaining = getDailyCreditsRemaining();
-      if (items.length > dailyRemaining) {
-        var dailyError = new Error('今日免費方案行情額度已用完');
-        dailyError.code = 'QUOTE_DAILY_LIMIT';
-        dailyError.waitMs = dailyResetWaitMs();
-        throw dailyError;
-      }
-      var windowState = slidingWindowUsage(items.length);
-      if (windowState.waitMs > 0) {
-        var rateError = new Error('行情查詢受免費方案額度限制，請稍後再試');
-        rateError.code = 'QUOTE_RATE_LIMIT';
-        rateError.waitMs = windowState.waitMs;
-        throw rateError;
-      }
-      // 先預留容量再請求；若服務端命中快取則不扣 credits
+    function doFetch() {
       return requestQuotes(items).then(function (payload) {
-        var fromCache = !!(payload && payload.cached);
-        if (!fromCache) {
-          var now = Date.now();
-          // 鎖內再讀一次 log，避免並發窗口漂移
-          var log = loadRequestLog();
-          log.push({ t: now, credits: items.length });
-          saveRequestLog(log);
-          dailyCreditState = loadDailyCreditState();
-          dailyCreditState.credits += items.length;
-          lsSet(QUOTE_DAILY_USAGE_KEY, JSON.stringify(dailyCreditState));
-        }
         return payload.quotesMap || {};
       });
     }
-
     if (navigator.locks && navigator.locks.request) {
-      return navigator.locks.request('quote-pwa-quotes', reserveAndFetch);
+      return navigator.locks.request('quote-pwa-quotes', doFetch);
     }
-    var queuedRequest = quoteRequestQueue.then(reserveAndFetch, reserveAndFetch);
+    var queuedRequest = quoteRequestQueue.then(doFetch, doFetch);
     quoteRequestQueue = queuedRequest.then(function () {}, function () {});
     return queuedRequest;
   }
 
   function quoteErrorMessage(error, fallback) {
-    if (error && error.code === 'QUOTE_DAILY_LIMIT') {
-      return '今日行情額度已用完，將於 UTC 00:00 重置';
-    }
-    if (error && error.code === 'QUOTE_RATE_LIMIT') {
-      if (error.waitMs) {
-        return '每分鐘請求過於頻繁，請約 ' +
-          Math.ceil(error.waitMs / 1000) + ' 秒後重試';
-      }
-      return error.message || '請求過於頻繁，請稍後再試';
-    }
-    if (error && error.code === 'QUOTE_PLAN_LIMIT') {
-      return error.message || '目前方案不支援此標的';
-    }
     var msg = error && error.message ? String(error.message) : '';
     if (/Failed to fetch|NetworkError|Load failed|網路/i.test(msg)) {
       return '無法連線行情伺服器，請檢查網路後重試';
@@ -584,10 +486,7 @@
   }
 
   function quoteErrorToast(error, fallback) {
-    var msg = quoteErrorMessage(error, fallback);
-    var cls = (error && (error.code === 'QUOTE_DAILY_LIMIT' || error.code === 'QUOTE_RATE_LIMIT' || error.code === 'QUOTE_PLAN_LIMIT'))
-      ? 'warn' : 'error';
-    showToast(msg, 3200, cls);
+    showToast(quoteErrorMessage(error, fallback), 3200, 'error');
   }
 
   // 騰訊財經公開行情（瀏覽器直連，無需 API key / 無需 /api/market）
@@ -1131,11 +1030,6 @@
   async function refresh() {
     if (inFlight || document.visibilityState === 'hidden') { scheduleRefresh(); return; }
     if (!isOnline) { scheduleRefresh(); return; }
-    var dailyRemaining = getDailyCreditsRemaining();
-    if (!dailyRemaining) { scheduleRefresh(dailyResetWaitMs(), true); return; }
-    var batchSize = Math.min(MAX_BATCH_CREDITS, dailyRemaining);
-    var waitMs = quoteRequestWaitMs(batchSize);
-    if (waitMs > 0) { scheduleRefresh(waitMs, true); return; }
     inFlight = true;
     var ver = pageVersion;
     var pageAtStart = currentPage;
@@ -1150,11 +1044,10 @@
     if (!isFinite(offset) || offset < 0) offset = 0;
     offset = needed.length ? offset % needed.length : 0;
     var batch = [];
-    for (var itemIndex = 0; itemIndex < Math.min(batchSize, needed.length); itemIndex += 1) {
+    for (var itemIndex = 0; itemIndex < Math.min(MAX_BATCH_SIZE, needed.length); itemIndex += 1) {
       batch.push(needed[(offset + itemIndex) % needed.length]);
     }
     lsSet(QUOTE_ROTATION_KEY, String((offset + batch.length) % needed.length));
-    var retryDelay = 0;
     var hasMore = needed.length > batch.length;
     try {
       var data = await fetchQuotes(batch);
@@ -1163,7 +1056,6 @@
       hasFetchedOnce = true;
       markUpdatedAt();
       if (isOnline) setStatus(null); else setStatus('offline', '目前離線 · 顯示快取行情');
-      // 切頁後不繪製錯誤頁
       if (ver === pageVersion) {
         if (pageAtStart === 'watchlist' && currentPage === 'watchlist') renderWatchlist(false);
         if (pageAtStart === 'markets' && currentPage === 'markets') renderMarkets(false);
@@ -1171,55 +1063,19 @@
       if (selectedKey) updateModalPrices();
       checkMarketSessionToasts();
     } catch (e) {
-      if (e && (e.code === 'QUOTE_RATE_LIMIT' || e.code === 'QUOTE_DAILY_LIMIT')) {
-        retryDelay = e.waitMs || 15000;
-        setStatus('warn', quoteErrorMessage(e, '額度限制，稍後重試'));
-      } else if (e && e.code === 'QUOTE_PLAN_LIMIT') {
-        consecutiveFails = 0;
-        hasFetchedOnce = true;
-        setStatus('warn', quoteErrorMessage(e, '方案不支援此標的'));
-        if (ver === pageVersion) {
-          if (currentPage === 'watchlist') renderWatchlist(true);
-          if (currentPage === 'markets') renderMarkets(true);
-        }
-      } else {
-        consecutiveFails += 1;
-        hasFetchedOnce = true;
-        if (!navigator.onLine) setStatus('offline', '目前離線 · 顯示快取行情');
-        else setStatus('warn', (e && e.message) ? String(e.message).slice(0, 60) : '行情連線不穩 · 重試中');
-        if (ver === pageVersion) {
-          if (currentPage === 'watchlist') renderWatchlist(true);
-          if (currentPage === 'markets') renderMarkets(true);
-        }
+      consecutiveFails += 1;
+      hasFetchedOnce = true;
+      if (!navigator.onLine) setStatus('offline', '目前離線 · 顯示快取行情');
+      else setStatus('warn', (e && e.message) ? String(e.message).slice(0, 60) : '行情連線不穩 · 重試中');
+      if (ver === pageVersion) {
+        if (currentPage === 'watchlist') renderWatchlist(true);
+        if (currentPage === 'markets') renderMarkets(true);
       }
     } finally {
       inFlight = false;
-      // 有剩餘輪替時，等滑動窗口能再放下一批再刷
-      var nextWait = hasMore ? quoteRequestWaitMs(Math.min(MAX_BATCH_CREDITS, getDailyCreditsRemaining())) : 0;
-      scheduleRefresh(Math.max(retryDelay, nextWait), retryDelay > 0 || hasMore);
+      // 仍有未刷標的時立刻接下一輪，否則依設定間隔
+      scheduleRefresh(hasMore ? 400 : 0, hasMore);
     }
-  }
-
-  function quoteRequestWaitMs(creditsNeeded) {
-    creditsNeeded = creditsNeeded == null ? 1 : creditsNeeded;
-    var windowState = slidingWindowUsage(creditsNeeded);
-    return Math.max(0, windowState.waitMs, dailyResetWaitMsIfExhausted());
-  }
-
-  function getDailyCreditsRemaining() {
-    // 呼叫端若已在鎖內重讀則直接用；否則仍以記憶體為準（僅用於預估）
-    var today = utcDayKey(Date.now());
-    if (dailyCreditState.day !== today) dailyCreditState = { day: today, credits: 0 };
-    return Math.max(0, MAX_QUOTE_CREDITS_PER_DAY - dailyCreditState.credits);
-  }
-
-  function dailyResetWaitMs() {
-    var now = new Date();
-    return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1) - now.getTime();
-  }
-
-  function dailyResetWaitMsIfExhausted() {
-    return getDailyCreditsRemaining() ? 0 : dailyResetWaitMs();
   }
 
   function scheduleRefresh(minDelay, force) {
@@ -1227,8 +1083,9 @@
     if ((!pollInterval && !force) || document.visibilityState === 'hidden' || !isOnline) return;
     var delay = pollInterval ? (consecutiveFails ?
       Math.min(pollInterval * Math.pow(2, consecutiveFails), 300000) : pollInterval) : 0;
-    delay = Math.max(delay, minDelay || 0, quoteRequestWaitMs());
-    if (!delay) return;
+    delay = Math.max(delay, minDelay || 0);
+    if (!delay && !force) return;
+    if (!delay && force) delay = 50;
     pollTimer = setTimeout(refresh, delay);
   }
   function startPolling() {
@@ -1591,19 +1448,9 @@
   });
   document.getElementById('btn-refresh').addEventListener('click', function () {
     if (inFlight) { showToast('更新中…', 1800, 'warn'); return; }
-    var neededCount = collectNeeded().length;
-    var dailyRemaining = getDailyCreditsRemaining();
-    var batchSize = Math.min(MAX_BATCH_CREDITS, dailyRemaining, neededCount || 1);
-    var waitMs = quoteRequestWaitMs(batchSize);
-    if (waitMs > 0) {
-      scheduleRefresh(waitMs, true);
-      showToast('免費方案額度限制，約 ' + Math.ceil(waitMs / 1000) + ' 秒後可更新', 2800, 'warn');
-      return;
-    }
     consecutiveFails = 0;
     startPolling();
-    showToast(neededCount > MAX_BATCH_CREDITS ?
-      '更新最多 6 檔，其他自選將逐分鐘輪替' : '正在更新行情', 2200, 'warn');
+    showToast('正在更新行情', 1800, 'warn');
   });
   document.getElementById('btn-search').addEventListener('click', async function () {
     var raw = document.getElementById('search-input').value.trim();
