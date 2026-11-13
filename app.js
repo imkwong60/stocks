@@ -577,22 +577,87 @@
     showToast(msg, 2800, cls);
   }
 
-  function requestQuotes(items) {
-    return fetch('/api/market', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      cache: 'no-store',
-      body: JSON.stringify({ action: 'quotes', items: items })
-    }).then(function (res) {
-      return res.json().then(function (payload) {
-        if (!res.ok) throw new Error(payload.error || '行情查詢失敗');
-        return payload;
+  // 前端直接呼叫 Twelve Data（不再經 /api/market）
+  var TWELVE_DATA_API_KEY = '853e6e2eb9324cf38b3343c5b95994ba';
+  var TWELVE_DATA_URL = 'https://api.twelvedata.com';
+  var CLIENT_QUOTE_CACHE_TTL_MS = 25000;
+  var clientQuoteCache = new Map(); // cacheKey -> { expiresAt, promise }
+
+  function twelveSymbol(item) {
+    if (item.market === 'hk') {
+      if (item.symbol === 'HSI') return 'HSI';
+      var hkSymbol = String(item.symbol).replace(/^0+/, '').padStart(4, '0');
+      return hkSymbol + ':HKEX';
+    }
+    if (item.symbol === 'INX' || item.symbol === '.INX') return 'SPX';
+    return String(item.symbol).replace(/^\./, '');
+  }
+
+  function canonicalSymbol(symbol) {
+    var normalized = String(symbol || '').split(':')[0].replace(/^\./, '').toUpperCase();
+    if (normalized === 'INX') return 'SPX';
+    return /^\d+$/.test(normalized) ? normalized.replace(/^0+/, '') : normalized;
+  }
+
+  function extractTwelveQuotes(payload) {
+    if (payload && payload.symbol) return [payload];
+    if (Array.isArray(payload && payload.data)) return payload.data;
+    if (!payload || typeof payload !== 'object') return [];
+    return Object.keys(payload)
+      .map(function (key) { return payload[key]; })
+      .filter(function (quote) { return quote && typeof quote === 'object' && quote.symbol; });
+  }
+
+  function requestTwelveData(path, params) {
+    var url = new URL(TWELVE_DATA_URL + path);
+    Object.keys(params).forEach(function (key) {
+      url.searchParams.set(key, params[key]);
+    });
+    url.searchParams.set('apikey', TWELVE_DATA_API_KEY);
+    return fetch(url.toString(), { cache: 'no-store', signal: AbortSignal.timeout(8000) })
+      .then(function (res) {
+        return res.json().then(function (payload) {
+          if (!res.ok || (payload && payload.status === 'error')) {
+            throw new Error((payload && (payload.message || payload.msg)) || 'Twelve Data 請求失敗');
+          }
+          return payload;
+        });
       });
-    }).then(function (payload) {
+  }
+
+  function requestQuotes(items) {
+    var normalized = items.map(function (item) {
+      return { market: item.market, symbol: String(item.symbol).toUpperCase() };
+    });
+    var symbols = normalized.map(twelveSymbol);
+    var cacheKey = symbols.slice().sort().join(',');
+    var now = Date.now();
+    var cached = clientQuoteCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return cached.promise.then(function (quotesMap) {
+        return { quotesMap: quotesMap, cached: true };
+      });
+    }
+    if (cached) clientQuoteCache.delete(cacheKey);
+    clientQuoteCache.forEach(function (entry, key) {
+      if (entry.expiresAt <= now) clientQuoteCache.delete(key);
+    });
+    if (clientQuoteCache.size > 80) {
+      clientQuoteCache.delete(clientQuoteCache.keys().next().value);
+    }
+
+    var entry = { expiresAt: Infinity, promise: null };
+    entry.promise = requestTwelveData('/quote', { symbol: symbols.join(',') }).then(function (payload) {
+      var returned = extractTwelveQuotes(payload);
       var result = {};
-      (payload.quotes || []).forEach(function (quote) {
-        var symbol = quote.symbol;
-        var key = makeKey(quote.market, symbol);
+      normalized.forEach(function (item, index) {
+        var requestedSymbol = canonicalSymbol(symbols[index]);
+        var quote = returned.find(function (candidate) {
+          return canonicalSymbol(candidate.symbol) === requestedSymbol;
+        });
+        if (!quote || quote.close == null) return;
+        var symbol = item.symbol;
+        var key = makeKey(item.market, symbol);
         var price = num(quote.close);
         var prevClose = num(quote.previous_close);
         var change = num(quote.change);
@@ -601,15 +666,27 @@
         if (changePct == null && change != null && prevClose) changePct = change / prevClose * 100;
         if (price == null) return;
         result[key] = {
-          key: key, market: quote.market, symbol: symbol,
-          name: lookupName(quote.market, symbol, quote.name),
+          key: key, market: item.market, symbol: symbol,
+          name: lookupName(item.market, symbol, quote.name || quote.instrument_name),
           price: price, prevClose: prevClose, open: num(quote.open),
           high: num(quote.high), low: num(quote.low), volume: num(quote.volume) || 0,
-          change: change, changePct: changePct, currency: quote.currency || (quote.market === 'hk' ? 'HKD' : 'USD'),
-          time: quote.datetime || ''
+          change: change, changePct: changePct,
+          currency: quote.currency || (item.market === 'hk' ? 'HKD' : 'USD'),
+          time: quote.datetime || quote.timestamp || ''
         };
       });
-      return { quotesMap: result, cached: !!payload.cached };
+      if (!Object.keys(result).length) {
+        throw new Error((payload && (payload.message || payload.msg)) || '行情查詢失敗');
+      }
+      entry.expiresAt = Date.now() + CLIENT_QUOTE_CACHE_TTL_MS;
+      return result;
+    }, function (error) {
+      if (clientQuoteCache.get(cacheKey) === entry) clientQuoteCache.delete(cacheKey);
+      throw error;
+    });
+    clientQuoteCache.set(cacheKey, entry);
+    return entry.promise.then(function (quotesMap) {
+      return { quotesMap: quotesMap, cached: false };
     });
   }
 
@@ -1119,25 +1196,36 @@
     var now = Date.now();
     var hit = searchCache.get(key);
     if (hit && hit.expiresAt > now) return hit.results.slice();
-    // 清掉過期
     searchCache.forEach(function (entry, k) {
       if (entry.expiresAt <= now) searchCache.delete(k);
     });
     if (searchCache.size > 40) {
       searchCache.delete(searchCache.keys().next().value);
     }
-    var res = await fetch('/api/market', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      cache: 'no-store',
-      body: JSON.stringify({ action: 'search', query: q })
+    var payload = await requestTwelveData('/symbol_search', {
+      symbol: String(q).trim(),
+      outputsize: '20'
     });
-    var payload = await res.json();
-    if (!res.ok) throw new Error(payload.error || '搜尋失敗');
-    var results = (payload.results || []).map(function (item) {
-      item.name = toTraditional(item.name || item.symbol);
-      return item;
-    });
+    var data = Array.isArray(payload.data) ? payload.data : [];
+    var results = data.map(function (item) {
+      var exchange = String(item.exchange || '').toUpperCase();
+      var country = String(item.country || '').toLowerCase();
+      var market;
+      if (exchange.indexOf('HKEX') !== -1 || country.indexOf('hong kong') !== -1) market = 'hk';
+      else if (country.indexOf('united states') !== -1 ||
+          ['NASDAQ', 'NYSE', 'NYSE ARCA', 'NYSE AMERICAN', 'BATS'].indexOf(exchange) !== -1) market = 'us';
+      if (!market || !item.symbol) return null;
+      var symbol = String(item.symbol).toUpperCase();
+      if (market === 'hk' && /^\d+$/.test(symbol)) {
+        symbol = symbol.replace(/^0+/, '').padStart(5, '0');
+      }
+      return {
+        market: market,
+        symbol: symbol,
+        name: toTraditional(item.instrument_name || symbol),
+        key: market + ':' + symbol
+      };
+    }).filter(Boolean);
     searchCache.set(key, { expiresAt: now + SEARCH_CACHE_TTL_MS, results: results });
     return results.slice();
   }
