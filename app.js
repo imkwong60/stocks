@@ -622,28 +622,43 @@
 
   function stockRowHtml(q, opts) {
     opts = opts || {};
+    var market = (q && q.market) || opts.market || '';
+    var symbol = (q && q.symbol) || opts.symbol || '';
+    var key = (q && q.key) || opts.key || makeKey(market, symbol);
     var dragHandle = opts.reorder ?
       '<button type="button" class="drag-handle" aria-label="拖放排序" title="拖放排序">⠿</button>' : '';
+    var liveBtn =
+      '<button type="button" class="live-quote-btn" data-act="live" data-market="' + escapeHtml(market) +
+      '" data-symbol="' + escapeHtml(symbol) + '" aria-label="更新即時報價" title="更新即時報價">⚡</button>';
     if (opts.loading) {
-      return '<div class="card stock-row" data-key="' + escapeHtml(opts.key) + '" tabindex="0" role="button">' +
+      return '<div class="card stock-row" data-key="' + escapeHtml(key) + '" data-market="' + escapeHtml(market) +
+        '" data-symbol="' + escapeHtml(symbol) + '" tabindex="0" role="button">' +
         '<div class="stock-info"><div class="stock-name skeleton" style="width:100px;height:18px"></div>' +
-        '<div class="stock-code">' + escapeHtml(opts.symbol || '') + '</div></div>' +
+        '<div class="stock-code">' + escapeHtml(symbol) + '</div></div>' +
         '<div class="stock-price-block"><div class="skeleton" style="width:70px;height:20px;margin-left:auto"></div></div>' +
         dragHandle + '</div>';
     }
     if (opts.failed || !q) {
-      return '<div class="card stock-row" data-key="' + escapeHtml(opts.key) + '" tabindex="0" role="button">' +
-        '<div class="stock-info"><div class="stock-name" data-field="name">' + escapeHtml(opts.name || opts.symbol || '—') + '</div>' +
-        '<div class="stock-code">' + escapeHtml(opts.symbol || '') + ' · ' + (opts.market || '').toUpperCase() + '</div></div>' +
-        '<div class="stock-price-block"><div class="stock-price fail-text" data-field="price">—</div>' +
-        '<div class="stock-change flat" data-field="change">無法取得</div></div>' + dragHandle + '</div>';
+      return '<div class="card stock-row" data-key="' + escapeHtml(key) + '" data-market="' + escapeHtml(market) +
+        '" data-symbol="' + escapeHtml(symbol) + '" tabindex="0" role="button">' +
+        '<div class="stock-info"><div class="stock-name" data-field="name">' + escapeHtml(opts.name || symbol || '—') + '</div>' +
+        '<div class="stock-code">' + escapeHtml(symbol) + ' · ' + String(market).toUpperCase() + '</div></div>' +
+        '<div class="stock-price-block" style="display:flex;align-items:center;gap:8px;justify-content:flex-end">' +
+          '<div style="text-align:right"><div class="stock-price fail-text" data-field="price">—</div>' +
+          '<div class="stock-change flat" data-field="change">無法取得</div></div>' +
+          liveBtn +
+        '</div>' + dragHandle + '</div>';
     }
     var ch = formatChange(q.change, q.changePct, q.market);
-    return '<div class="card stock-row" data-key="' + escapeHtml(q.key) + '" tabindex="0" role="button">' +
+    return '<div class="card stock-row" data-key="' + escapeHtml(q.key) + '" data-market="' + escapeHtml(q.market) +
+      '" data-symbol="' + escapeHtml(q.symbol) + '" tabindex="0" role="button">' +
       '<div class="stock-info"><div class="stock-name" data-field="name">' + escapeHtml(q.name) + '</div>' +
       '<div class="stock-code">' + escapeHtml(q.symbol) + ' · ' + q.market.toUpperCase() + '</div></div>' +
-      '<div class="stock-price-block"><div class="stock-price" data-field="price">' + formatPrice(q.price, q.market, q.symbol) + '</div>' +
-      '<div class="stock-change ' + ch.cls + '" data-field="change">' + ch.text + '</div></div>' + dragHandle + '</div>';
+      '<div class="stock-price-block" style="display:flex;align-items:center;gap:8px;justify-content:flex-end">' +
+        '<div style="text-align:right"><div class="stock-price" data-field="price">' + formatPrice(q.price, q.market, q.symbol) + '</div>' +
+        '<div class="stock-change ' + ch.cls + '" data-field="change">' + ch.text + '</div></div>' +
+        liveBtn +
+      '</div>' + dragHandle + '</div>';
   }
 
   function updateRowPrices(container) {
@@ -883,6 +898,67 @@
     }
   }
 
+
+  async function applyLiveQuote(market, symbol, btn) {
+    var key = makeKey(market, symbol);
+    if (btn) {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      btn.classList.add('busy');
+    }
+    try {
+      var res = await fetch('/api/market', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({ action: 'live_quote', item: { market: market, symbol: symbol } })
+      });
+      var payload = await res.json();
+      if (!res.ok) throw new Error(payload.error || '即時查詢失敗');
+      var raw = payload.quote;
+      if (!raw || raw.close == null) throw new Error('無報價資料');
+      var prevQ = quotes[key] || {};
+      quotes[key] = {
+        key: key,
+        market: market,
+        symbol: symbol,
+        name: lookupName(market, symbol, raw.name || prevQ.name || symbol),
+        price: num(raw.close),
+        prevClose: num(raw.previous_close),
+        open: num(raw.open),
+        high: num(raw.high),
+        low: num(raw.low),
+        volume: num(raw.volume) || 0,
+        change: num(raw.change),
+        changePct: num(raw.percent_change),
+        currency: raw.currency || (market === 'hk' ? 'HKD' : 'USD'),
+        time: raw.datetime || new Date().toISOString(),
+        source: raw.source || (market === 'hk' ? 'itick' : 'twelve')
+      };
+      if (quotes[key].change == null && quotes[key].price != null && quotes[key].prevClose != null) {
+        quotes[key].change = quotes[key].price - quotes[key].prevClose;
+      }
+      if (quotes[key].changePct == null && quotes[key].change != null && quotes[key].prevClose) {
+        quotes[key].changePct = quotes[key].change / quotes[key].prevClose * 100;
+      }
+      if (currentPage === 'watchlist') renderWatchlist(false);
+      if (currentPage === 'markets') renderMarkets(false);
+      if (selectedKey === key) updateModalPrices();
+      markUpdatedAt();
+      var srcLabel = market === 'hk' ? 'iTick' : 'Twelve Data';
+      showToast('已更新即時報價（' + srcLabel + '）', 1800, 'success');
+      return quotes[key];
+    } catch (err) {
+      quoteErrorToast(err, '即時報價更新失敗');
+      throw err;
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('busy');
+      }
+    }
+  }
+
   function openDetail(key, forceRebuild) {
     var q = quotes[key];
     if (!q) return;
@@ -937,60 +1013,10 @@
     });
     var liveBtn = document.getElementById('modal-live-refresh');
     if (liveBtn) {
-      liveBtn.onclick = async function () {
-        if (liveBtn.disabled) return;
-        liveBtn.disabled = true;
-        var prevLabel = liveBtn.textContent;
-        liveBtn.textContent = '更新中…';
-        try {
-          var res = await fetch('/api/market', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            cache: 'no-store',
-            body: JSON.stringify({ action: 'live_quote', item: { market: q.market, symbol: q.symbol } })
-          });
-          var payload = await res.json();
-          if (!res.ok) throw new Error(payload.error || '即時查詢失敗');
-          var raw = payload.quote;
-          if (!raw || raw.close == null) throw new Error('無報價資料');
-          var key = makeKey(q.market, q.symbol);
-          var prevQ = quotes[key] || q;
-          var market = q.market;
-          quotes[key] = {
-            key: key,
-            market: market,
-            symbol: q.symbol,
-            name: lookupName(market, q.symbol, raw.name || prevQ.name || q.symbol),
-            price: num(raw.close),
-            prevClose: num(raw.previous_close),
-            open: num(raw.open),
-            high: num(raw.high),
-            low: num(raw.low),
-            volume: num(raw.volume) || 0,
-            change: num(raw.change),
-            changePct: num(raw.percent_change),
-            currency: raw.currency || (market === 'hk' ? 'HKD' : 'USD'),
-            time: raw.datetime || new Date().toISOString(),
-            source: raw.source || (market === 'hk' ? 'itick' : 'twelve')
-          };
-          if (quotes[key].change == null && quotes[key].price != null && quotes[key].prevClose != null) {
-            quotes[key].change = quotes[key].price - quotes[key].prevClose;
-          }
-          if (quotes[key].changePct == null && quotes[key].change != null && quotes[key].prevClose) {
-            quotes[key].changePct = quotes[key].change / quotes[key].prevClose * 100;
-          }
+      liveBtn.onclick = function () {
+        applyLiveQuote(q.market, q.symbol, liveBtn).then(function () {
           updateModalPrices();
-          if (currentPage === 'watchlist') renderWatchlist(false);
-          if (currentPage === 'markets') renderMarkets(false);
-          markUpdatedAt();
-          var srcLabel = market === 'hk' ? 'iTick' : 'Twelve Data';
-          showToast('已更新即時報價（' + srcLabel + '）', 2200, 'success');
-        } catch (err) {
-          quoteErrorToast(err, '即時報價更新失敗');
-        } finally {
-          liveBtn.disabled = false;
-          liveBtn.textContent = prevLabel || '更新即時報價';
-        }
+        }).catch(function () {});
       };
     }
     document.getElementById('modal-toggle').onclick = function () {
@@ -1583,8 +1609,16 @@
   });
   function bindList(id) {
     document.getElementById(id).addEventListener('click', function (e) {
-      // 點拖拽把手不開詳情（stopPropagation 擋不住同元素其他 listener）
       if (e.target.closest('.drag-handle')) return;
+      var live = e.target.closest('[data-act="live"]');
+      if (live) {
+        e.preventDefault();
+        e.stopPropagation();
+        var market = live.dataset.market;
+        var symbol = live.dataset.symbol;
+        if (market && symbol) applyLiveQuote(market, symbol, live);
+        return;
+      }
       var row = e.target.closest('.stock-row[data-key]');
       if (row) openDetail(row.dataset.key, true);
     });
