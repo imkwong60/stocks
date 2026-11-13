@@ -1,5 +1,5 @@
 /* 股票本本 Service Worker — 快取 + Web Push */
-var CACHE = 'quote-pwa-v33';
+var CACHE = 'quote-pwa-v34';
 var ASSETS = ['./', './index.html', './app.js?v=34', './manifest.json'];
 
 self.addEventListener('install', function (event) {
