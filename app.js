@@ -7,6 +7,13 @@
   var INTERVAL_KEY = 'quote_interval_v1';
   var SESSION_TOAST_KEY = 'quote_session_toasts_v1';
   var QUOTE_ROTATION_KEY = 'quote_rotation_offset_v1';
+  var ALERT_PCT_THRESHOLD = 5;
+  var ALERT_ENABLED_KEY = 'quote_alert_enabled_v1';
+  var ALERT_LOG_KEY = 'quote_alert_log_v1';
+  var PUSH_REG_ID = 'quote_push_registry_v1';
+  // 與 Vercel VAPID_PUBLIC_KEY 一致（私鑰只放伺服器）
+  var VAPID_PUBLIC_KEY = 'BDwJnz6kxYCrBCyJE47Zk_7SA-FTmyLWw5LVsvnPVdU12gyZDyUOnIoqss0Y_QClvrzYhvb1sMHzesJ8TOXAFqI';
+
   var MAX_BATCH_SIZE = 20; // 騰訊批量上限（一次刷新）
 
   function lsGet(k, fallback) {
@@ -316,10 +323,21 @@
     }
   }
 
+  function syncPushItemsIfEnabled() {
+    if (!isAlertEnabled()) return;
+    if (!navigator.serviceWorker) return;
+    navigator.serviceWorker.ready.then(function (reg) {
+      return reg.pushManager.getSubscription();
+    }).then(function (sub) {
+      if (sub) return upsertPushRegistry(sub);
+    }).catch(function () {});
+  }
+
   function saveWatchlist() {
     lsSet(STORAGE_KEY, JSON.stringify(watchlist));
     lsSet(INIT_KEY, '1');
     scheduleSyncUp();
+    try { syncPushItemsIfEnabled(); } catch (e) {}
   }
 
   var EMAIL_KEY = 'quote_cloud_email_v1';
@@ -618,6 +636,209 @@
     return entry.promise.then(function (map) {
       return { quotesMap: map, cached: false };
     });
+  }
+
+
+  function urlBase64ToUint8Array(base64String) {
+    var padding = '='.repeat((4 - base64String.length % 4) % 4);
+    var base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    var raw = atob(base64);
+    var out = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  }
+
+  function loadAlertLog() {
+    try {
+      var o = JSON.parse(lsGet(ALERT_LOG_KEY, '{}') || '{}');
+      return o && typeof o === 'object' ? o : {};
+    } catch (e) { return {}; }
+  }
+
+  function saveAlertLog(log) {
+    lsSet(ALERT_LOG_KEY, JSON.stringify(log));
+  }
+
+  function isAlertEnabled() {
+    return lsGet(ALERT_ENABLED_KEY, '0') === '1';
+  }
+
+  function setAlertEnabled(on) {
+    lsSet(ALERT_ENABLED_KEY, on ? '1' : '0');
+  }
+
+  async function showLocalAlert(title, body, tag) {
+    try {
+      if (!('Notification' in window) || Notification.permission !== 'granted') return;
+      var reg = null;
+      if (navigator.serviceWorker) {
+        try { reg = await navigator.serviceWorker.ready; } catch (e) {}
+      }
+      if (reg && reg.showNotification) {
+        await reg.showNotification(title, {
+          body: body,
+          icon: './icons/icon-192.png',
+          tag: tag || 'quote-local',
+          renotify: true,
+          data: { url: './' }
+        });
+      } else {
+        new Notification(title, { body: body, tag: tag || 'quote-local' });
+      }
+    } catch (e) {}
+  }
+
+  /** 報價更新後檢查 ≥5%（本機通知，App 開著或剛更新時） */
+  function checkPriceAlerts(quotesMap) {
+    if (!isAlertEnabled()) return;
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    var day = new Date().toISOString().slice(0, 10);
+    var log = loadAlertLog();
+    var hits = [];
+    Object.keys(quotesMap || {}).forEach(function (key) {
+      var q = quotesMap[key];
+      if (!q || q.changePct == null) return;
+      if (Math.abs(q.changePct) < ALERT_PCT_THRESHOLD) return;
+      var prev = log[key];
+      if (prev && prev.day === day) return;
+      log[key] = { day: day, pct: q.changePct };
+      hits.push(q);
+    });
+    if (!hits.length) return;
+    saveAlertLog(log);
+    hits.slice(0, 5).forEach(function (q) {
+      var sign = q.changePct > 0 ? '+' : '';
+      showLocalAlert(
+        q.name || q.symbol,
+        '今日 ' + sign + Number(q.changePct).toFixed(2) + '%（門檻 ' + ALERT_PCT_THRESHOLD + '%）',
+        'move-' + q.key
+      );
+    });
+  }
+
+  async function upsertPushRegistry(subscription) {
+    if (!sb || !subscription) return false;
+    var sub = subscription.toJSON ? subscription.toJSON() : subscription;
+    var device = {
+      endpoint: sub.endpoint,
+      keys: sub.keys,
+      email: (boundEmail || '').toLowerCase() || 'anonymous',
+      items: watchlist.map(function (w) {
+        return { market: w.market, symbol: w.symbol };
+      }).filter(function (x) {
+        return x.symbol && x.symbol !== 'HSI' && x.symbol !== 'DJI' && x.symbol !== 'IXIC' && x.symbol !== 'INX';
+      }),
+      updatedAt: new Date().toISOString(),
+      lastAlerts: {}
+    };
+    // 指數也納入監控
+    MARKET_INDICES.forEach(function (p) {
+      if (!device.items.some(function (i) { return i.market === p.market && i.symbol === p.symbol; })) {
+        device.items.push({ market: p.market, symbol: p.symbol });
+      }
+    });
+    watchlist.forEach(function (w) {
+      if (!device.items.some(function (i) { return i.market === w.market && i.symbol === w.symbol; })) {
+        device.items.push({ market: w.market, symbol: w.symbol });
+      }
+    });
+
+    var existing = null;
+    try {
+      var res = await sb.from('notepad_data').select('data').eq('id', PUSH_REG_ID).maybeSingle();
+      existing = res && res.data && res.data.data;
+    } catch (e) {}
+    var devices = (existing && Array.isArray(existing.devices)) ? existing.devices.slice() : [];
+    devices = devices.filter(function (d) { return d && d.endpoint && d.endpoint !== device.endpoint; });
+    devices.push(device);
+    // 最多保留 30 個裝置
+    if (devices.length > 30) devices = devices.slice(-30);
+    try {
+      var up = await sb.from('notepad_data').upsert({
+        id: PUSH_REG_ID,
+        data: { devices: devices },
+        updated_at: new Date().toISOString()
+      });
+      return !up.error;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async function removePushRegistry(endpoint) {
+    if (!sb || !endpoint) return;
+    try {
+      var res = await sb.from('notepad_data').select('data').eq('id', PUSH_REG_ID).maybeSingle();
+      var existing = res && res.data && res.data.data;
+      var devices = (existing && Array.isArray(existing.devices)) ? existing.devices : [];
+      devices = devices.filter(function (d) { return d && d.endpoint !== endpoint; });
+      await sb.from('notepad_data').upsert({
+        id: PUSH_REG_ID,
+        data: { devices: devices },
+        updated_at: new Date().toISOString()
+      });
+    } catch (e) {}
+  }
+
+  async function enablePriceAlerts() {
+    if (!('Notification' in window) || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+      showToast('此瀏覽器不支援通知／推送', 2800, 'warn');
+      return false;
+    }
+    var perm = await Notification.requestPermission();
+    if (perm !== 'granted') {
+      showToast('未授權通知權限', 2800, 'warn');
+      return false;
+    }
+    var reg = await navigator.serviceWorker.ready;
+    var sub = await reg.pushManager.getSubscription();
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY)
+      });
+    }
+    var ok = await upsertPushRegistry(sub);
+    setAlertEnabled(true);
+    renderAlertSettings();
+    showToast(ok ? '已開啟大幅波動通知（≥5%）' : '已開本機通知（雲端訂閱可能失敗）', 2800, 'success');
+    return true;
+  }
+
+  async function disablePriceAlerts() {
+    setAlertEnabled(false);
+    try {
+      var reg = await navigator.serviceWorker.ready;
+      var sub = await reg.pushManager.getSubscription();
+      if (sub) {
+        await removePushRegistry(sub.endpoint);
+        try { await sub.unsubscribe(); } catch (e) {}
+      }
+    } catch (e) {}
+    renderAlertSettings();
+    showToast('已關閉波動通知', 2200, 'success');
+  }
+
+  function renderAlertSettings() {
+    var el = document.getElementById('alert-panel');
+    if (!el) return;
+    var on = isAlertEnabled();
+    var perm = ('Notification' in window) ? Notification.permission : 'denied';
+    el.innerHTML =
+      '<div style="font-size:14px;color:var(--text-secondary);line-height:1.5;margin-bottom:12px">' +
+        '自選／指數單日漲跌幅達到 <b>±' + ALERT_PCT_THRESHOLD + '%</b> 時通知你。<br />' +
+        'App 開啟時會即時檢查；背景約每 10 分鐘由伺服器檢查（需 Web Push）。' +
+      '</div>' +
+      '<div class="user-badge">通知權限：' + perm + ' · 狀態：' + (on ? '已開啟' : '關閉') + '</div>' +
+      '<div class="auth-row">' +
+        (on
+          ? '<button class="pill" type="button" id="btn-alert-off">關閉通知</button>'
+          : '<button class="pill primary" type="button" id="btn-alert-on">開啟 ≥5% 通知</button>') +
+      '</div>';
+    var onBtn = document.getElementById('btn-alert-on');
+    var offBtn = document.getElementById('btn-alert-off');
+    if (onBtn) onBtn.onclick = function () { enablePriceAlerts(); };
+    if (offBtn) offBtn.onclick = function () { disablePriceAlerts(); };
   }
 
   function stockRowHtml(q, opts) {
@@ -1093,7 +1314,7 @@
     if (page === 'watchlist') renderWatchlist(true);
     if (page === 'markets') { renderMarkets(true); refresh(); }
     if (page === 'search') renderPresets();
-    if (page === 'settings') renderAuthPanel();
+    if (page === 'settings') { renderAuthPanel(); renderAlertSettings(); }
   }
 
   function collectNeeded() {
@@ -1145,6 +1366,7 @@
     try {
       var data = await fetchQuotes(batch);
       Object.keys(data).forEach(function (k) { quotes[k] = data[k]; });
+      checkPriceAlerts(data);
       consecutiveFails = 0;
       hasFetchedOnce = true;
       markUpdatedAt();
@@ -1748,7 +1970,8 @@
   });
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('sw.js?v=14').then(function (reg) {
+    renderAlertSettings();
+  navigator.serviceWorker.register('sw.js?v=34').then(function (reg) {
       try { reg.update(); } catch (e) {}
     }).catch(function () {});
   }
