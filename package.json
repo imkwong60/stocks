@@ -1,0 +1,7 @@
+{
+  "name": "quote-pwa",
+  "private": true,
+  "dependencies": {
+    "web-push": "^3.6.7"
+  }
+}
