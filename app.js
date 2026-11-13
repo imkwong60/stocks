@@ -95,6 +95,8 @@
   var watchlist = [];
   var watchlistDrag = null;
   var quotes = {};
+  var corporateEvents = {}; // key -> events payload
+
   var currentPage = 'watchlist';
   var pageVersion = 0;
   var ALLOWED_INTERVALS = [0, 60000, 300000];
@@ -565,15 +567,19 @@
     }
     if (error && error.code === 'QUOTE_RATE_LIMIT') {
       if (error.waitMs) {
-        return '每分鐘最多 8 個報價 credits，請約 ' +
+        return '每分鐘請求過於頻繁，請約 ' +
           Math.ceil(error.waitMs / 1000) + ' 秒後重試';
       }
-      return error.message || 'Twelve Data 本分鐘額度已用完，請稍後再試';
+      return error.message || '請求過於頻繁，請稍後再試';
     }
     if (error && error.code === 'QUOTE_PLAN_LIMIT') {
-      return error.message || '目前方案不支援此標的（港股需 Pro）';
+      return error.message || '目前方案不支援此標的';
     }
-    if (error && error.message) return error.message;
+    var msg = error && error.message ? String(error.message) : '';
+    if (/Failed to fetch|NetworkError|Load failed|網路/i.test(msg)) {
+      return '無法連線行情伺服器，請檢查網路後重試';
+    }
+    if (msg) return msg;
     return fallback;
   }
 
@@ -584,39 +590,134 @@
     showToast(msg, 3200, cls);
   }
 
+  // 騰訊財經公開行情（瀏覽器直連，無需 API key / 無需 /api/market）
+  var QT_URL = 'https://qt.gtimg.cn/q=';
+  var SMARTBOX_URL = 'https://smartbox.gtimg.cn/s3/';
+  var CLIENT_QUOTE_CACHE_TTL_MS = 15000;
+  var clientQuoteCache = new Map();
+
+  function toQtWire(item) {
+    var sym = String(item.symbol || '').toUpperCase();
+    if (item.market === 'hk') {
+      if (sym === 'HSI') return 'hkHSI';
+      var digits = sym.replace(/\D/g, '');
+      return 'hk' + digits.padStart(5, '0');
+    }
+    if (sym === 'INX' || sym === '.INX') return 'usINX';
+    if (sym === 'DJI' || sym === '.DJI') return 'usDJI';
+    if (sym === 'IXIC' || sym === '.IXIC') return 'usIXIC';
+    return 'us' + sym.replace(/^\./, '');
+  }
+
+  function decodeGbk(buf) {
+    try {
+      if (typeof TextDecoder !== 'undefined') {
+        return new TextDecoder('gbk').decode(buf);
+      }
+    } catch (e) {}
+    try {
+      // 部分環境無 gbk：用 latin1 保數字欄位可解析（中文名可能亂碼）
+      var u8 = new Uint8Array(buf);
+      var s = '';
+      for (var i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+      return s;
+    } catch (e2) {
+      return '';
+    }
+  }
+
+  function parseQtText(text) {
+    var results = [];
+    var re = /v_([^=]+)="([^"]*)"/g;
+    var m;
+    while ((m = re.exec(text)) !== null) {
+      results.push({ wire: m[1], fields: m[2].split('~') });
+    }
+    return results;
+  }
+
+  function fieldsToQuote(fields, item) {
+    if (!fields || fields.length < 5) return null;
+    var close = num(fields[3]);
+    if (close == null) return null;
+    var prev = num(fields[4]);
+    var open = num(fields[5]);
+    var volume = num(fields[6]);
+    var change = num(fields[31]);
+    var percent = num(fields[32]);
+    var high = num(fields[33]);
+    var low = num(fields[34]);
+    var datetime = fields[30] || '';
+    var currency = item.market === 'hk' ? 'HKD' : 'USD';
+    if (item.market === 'us' && fields[35] && /^[A-Z]{3}$/.test(fields[35])) currency = fields[35];
+    else if (item.market === 'hk' && fields[75] && /^[A-Z]{3}$/.test(fields[75])) currency = fields[75];
+    var rawName = fields[1] || item.symbol;
+    return {
+      key: makeKey(item.market, item.symbol),
+      market: item.market,
+      symbol: item.symbol,
+      name: lookupName(item.market, item.symbol, rawName),
+      price: close,
+      prevClose: prev,
+      open: open,
+      high: high,
+      low: low,
+      volume: volume || 0,
+      change: change != null ? change : (prev != null ? close - prev : null),
+      changePct: percent,
+      currency: currency,
+      time: datetime
+    };
+  }
+
   function requestQuotes(items) {
-    return fetch('/api/market', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    var normalized = items.map(function (item) {
+      return { market: item.market, symbol: String(item.symbol).toUpperCase() };
+    });
+    var wires = normalized.map(toQtWire);
+    var cacheKey = wires.slice().sort().join(',');
+    var now = Date.now();
+    var cached = clientQuoteCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      return cached.promise.then(function (map) {
+        return { quotesMap: map, cached: true };
+      });
+    }
+    if (cached) clientQuoteCache.delete(cacheKey);
+    clientQuoteCache.forEach(function (entry, k) {
+      if (entry.expiresAt <= now) clientQuoteCache.delete(k);
+    });
+    if (clientQuoteCache.size > 80) clientQuoteCache.delete(clientQuoteCache.keys().next().value);
+
+    var entry = { expiresAt: Infinity, promise: null };
+    entry.promise = fetch(QT_URL + wires.join(','), {
       cache: 'no-store',
-      body: JSON.stringify({ action: 'quotes', items: items })
+      headers: { Accept: '*/*' }
     }).then(function (res) {
-      return res.json().then(function (payload) {
-        if (!res.ok) throw new Error(payload.error || '行情查詢失敗');
-        return payload;
-      });
-    }).then(function (payload) {
+      if (!res.ok) throw new Error('行情 HTTP ' + res.status);
+      return res.arrayBuffer();
+    }).then(function (buf) {
+      var text = decodeGbk(buf);
+      var parsed = parseQtText(text);
+      var byWire = {};
+      parsed.forEach(function (p) { byWire[p.wire] = p.fields; });
       var result = {};
-      (payload.quotes || []).forEach(function (quote) {
-        var symbol = quote.symbol;
-        var key = makeKey(quote.market, symbol);
-        var price = num(quote.close);
-        var prevClose = num(quote.previous_close);
-        var change = num(quote.change);
-        if (change == null && price != null && prevClose != null) change = price - prevClose;
-        var changePct = num(quote.percent_change);
-        if (changePct == null && change != null && prevClose) changePct = change / prevClose * 100;
-        if (price == null) return;
-        result[key] = {
-          key: key, market: quote.market, symbol: symbol,
-          name: lookupName(quote.market, symbol, quote.name),
-          price: price, prevClose: prevClose, open: num(quote.open),
-          high: num(quote.high), low: num(quote.low), volume: num(quote.volume) || 0,
-          change: change, changePct: changePct, currency: quote.currency || (quote.market === 'hk' ? 'HKD' : 'USD'),
-          time: quote.datetime || ''
-        };
+      normalized.forEach(function (item, idx) {
+        var wire = wires[idx];
+        var fields = byWire[wire] || byWire['r_' + wire];
+        var q = fieldsToQuote(fields, item);
+        if (q) result[q.key] = q;
       });
-      return { quotesMap: result, cached: !!payload.cached };
+      if (!Object.keys(result).length) throw new Error('無法解析行情資料');
+      entry.expiresAt = Date.now() + CLIENT_QUOTE_CACHE_TTL_MS;
+      return result;
+    }).catch(function (err) {
+      if (clientQuoteCache.get(cacheKey) === entry) clientQuoteCache.delete(cacheKey);
+      throw err;
+    });
+    clientQuoteCache.set(cacheKey, entry);
+    return entry.promise.then(function (map) {
+      return { quotesMap: map, cached: false };
     });
   }
 
@@ -805,6 +906,84 @@
     }
   }
 
+
+  function formatEventDate(iso) {
+    if (!iso) return '—';
+    var p = String(iso).split('-');
+    if (p.length !== 3) return iso;
+    return p[0] + '年' + Number(p[1]) + '月' + Number(p[2]) + '日';
+  }
+
+  function renderEventsHtml(ev) {
+    if (!ev || ev.error) {
+      return '<div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);color:var(--text-tertiary);font-size:13px">企業日程暫不可用</div>';
+    }
+    var rows = [];
+    if (ev.nextEarnings && ev.nextEarnings.date) {
+      rows.push({ title: '下一次業績', value: formatEventDate(ev.nextEarnings.date), tag: '業績' });
+    }
+    if (ev.nextDividend && ev.nextDividend.date) {
+      var amt = ev.nextDividend.amount != null ? (' · 每股 ' + ev.nextDividend.amount) : '';
+      rows.push({ title: '即將除淨／派息', value: formatEventDate(ev.nextDividend.date) + amt, tag: '除淨' });
+    }
+    if (ev.lastDividend && ev.lastDividend.date) {
+      var amt2 = ev.lastDividend.amount != null ? (' · 每股 ' + ev.lastDividend.amount) : '';
+      rows.push({ title: '最近一次除淨', value: formatEventDate(ev.lastDividend.date) + amt2, tag: '除淨' });
+    }
+    if (ev.splits && ev.splits[0] && ev.splits[0].date) {
+      var s = ev.splits[0];
+      var ratio = (s.numerator && s.denominator) ? (s.numerator + ':' + s.denominator) : '';
+      rows.push({ title: '最近拆股', value: formatEventDate(s.date) + (ratio ? (' · ' + ratio) : ''), tag: '拆股' });
+    }
+    // history list
+    var hist = (ev.dividends || []).slice(0, 5);
+    var histHtml = '';
+    if (hist.length) {
+      histHtml = '<div style="margin-top:10px;font-size:12px;color:var(--text-secondary)">近期派息紀錄</div><div style="margin-top:6px">' +
+        hist.map(function (d) {
+          return '<div style="display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid var(--border)">' +
+            '<span>' + formatEventDate(d.date) + '</span>' +
+            '<span>' + (d.amount != null ? d.amount : '—') + '</span></div>';
+        }).join('') + '</div>';
+    }
+    if (!rows.length && !histHtml) {
+      return '<div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border);color:var(--text-tertiary);font-size:13px">暫無除淨／業績資料</div>';
+    }
+    var cards = rows.map(function (r) {
+      return '<div class="detail-item" style="grid-column:1/-1"><label>' + r.title +
+        ' <span style="font-size:11px;opacity:.7">' + r.tag + '</span></label><span>' + escapeHtml(r.value) + '</span></div>';
+    }).join('');
+    return '<div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">' +
+      '<div style="font-weight:600;font-size:14px;margin-bottom:8px">企業日程</div>' +
+      '<div class="detail-grid">' + cards + '</div>' + histHtml +
+      '<div style="margin-top:8px;font-size:11px;color:var(--text-tertiary)">資料來源：Yahoo Finance · 日期可能為除淨日</div></div>';
+  }
+
+  async function loadCorporateEvents(market, symbol) {
+    var key = makeKey(market, symbol);
+    if (corporateEvents[key] && corporateEvents[key]._ts && Date.now() - corporateEvents[key]._ts < 6 * 3600 * 1000) {
+      return corporateEvents[key];
+    }
+    try {
+      var res = await fetch('/api/market', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({ action: 'events', items: [{ market: market, symbol: symbol }] })
+      });
+      var payload = await res.json();
+      if (!res.ok) throw new Error(payload.error || 'events failed');
+      var ev = (payload.events && payload.events[0]) || null;
+      if (ev) {
+        ev._ts = Date.now();
+        corporateEvents[key] = ev;
+      }
+      return ev;
+    } catch (e) {
+      return { error: e.message || 'failed' };
+    }
+  }
+
   function openDetail(key, forceRebuild) {
     var q = quotes[key];
     if (!q) return;
@@ -837,12 +1016,18 @@
       '<div class="detail-item"><label>最低</label><span data-field="low">' + formatPrice(q.low, q.market, q.symbol) + '</span></div>' +
       '<div class="detail-item"><label>成交量</label><span data-field="vol">' + formatVol(q.volume) + '</span></div>' +
       '<div class="detail-item"><label>更新時間</label><span data-field="time" style="font-size:13px">' + escapeHtml(q.time || '—') + '</span></div>' +
-      '</div><div class="modal-actions">' +
+      '</div>' +
+      '<div id="modal-events"><div style="margin-top:16px;color:var(--text-tertiary);font-size:13px">載入企業日程…</div></div>' +
+      '<div class="modal-actions">' +
       '<button class="pill ' + (inWatch ? '' : 'primary') + '" id="modal-toggle">' + (inWatch ? '移出自選' : '加入自選') + '</button>' +
       '<button class="pill ghost" id="modal-close">關閉</button></div>';
     document.getElementById('modal-overlay').classList.add('show');
     modal.classList.add('show');
     document.body.classList.add('modal-open');
+    loadCorporateEvents(q.market, q.symbol).then(function (ev) {
+      var box = document.getElementById('modal-events');
+      if (box) box.innerHTML = renderEventsHtml(ev);
+    });
     document.getElementById('modal-toggle').onclick = function () {
       toggleWatch(q.market, q.symbol);
       updateModalPrices(); // 不重建，保留滾動
@@ -1129,7 +1314,43 @@
   var SEARCH_CACHE_TTL_MS = 30000;
   var searchCache = new Map(); // query -> { expiresAt, results }
 
-    async function searchSuggest(q) {
+  /** 用騰訊報價取名稱（作搜尋預覽） */
+  async function fetchSymbolMeta(market, symbol) {
+    var item = { market: market, symbol: String(symbol).toUpperCase() };
+    var wire = toQtWire(item);
+    try {
+      var res = await fetch(QT_URL + wire, { cache: 'no-store', headers: { Accept: '*/*' } });
+      if (!res.ok) return null;
+      var text = decodeGbk(await res.arrayBuffer());
+      var parsed = parseQtText(text);
+      if (!parsed.length || !parsed[0].fields) return null;
+      var fields = parsed[0].fields;
+      var rawName = fields[1] || '';
+      var close = num(fields[3]);
+      var prev = num(fields[4]);
+      var change = num(fields[31]);
+      var percent = num(fields[32]);
+      if (!rawName && close == null) return null;
+      var name = lookupName(market, item.symbol, rawName);
+      if (name && name !== item.symbol) {
+        NAME_MAP[makeKey(market, item.symbol)] = name;
+      }
+      return {
+        market: market,
+        symbol: item.symbol,
+        name: name || item.symbol,
+        key: makeKey(market, item.symbol),
+        price: close,
+        change: change,
+        changePct: percent,
+        prevClose: prev
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async function searchSuggest(q) {
     var key = String(q || '').trim().toLowerCase();
     if (!key) return [];
     var now = Date.now();
@@ -1138,23 +1359,99 @@
     searchCache.forEach(function (entry, k) {
       if (entry.expiresAt <= now) searchCache.delete(k);
     });
-    if (searchCache.size > 40) {
-      searchCache.delete(searchCache.keys().next().value);
+    if (searchCache.size > 40) searchCache.delete(searchCache.keys().next().value);
+
+    var raw = String(q || '').trim();
+
+    // 數字 → 港股：拉騰訊拿名稱
+    if (/^\d{1,5}$/.test(raw)) {
+      var symbol = raw.replace(/^0+/, '').padStart(5, '0');
+      var meta = await fetchSymbolMeta('hk', symbol);
+      var results = meta
+        ? [meta]
+        : [{ market: 'hk', symbol: symbol, name: NAME_MAP['hk:' + symbol] || symbol, key: 'hk:' + symbol }];
+      searchCache.set(key, { expiresAt: now + SEARCH_CACHE_TTL_MS, results: results });
+      return results.slice();
     }
-    var res = await fetch('/api/market', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      cache: 'no-store',
-      body: JSON.stringify({ action: 'search', query: q })
-    });
-    var payload = await res.json();
-    if (!res.ok) throw new Error(payload.error || '搜尋失敗');
-    var results = (payload.results || []).map(function (item) {
-      item.name = toTraditional(item.name || item.symbol);
-      return item;
-    });
-    searchCache.set(key, { expiresAt: now + SEARCH_CACHE_TTL_MS, results: results });
-    return results.slice();
+
+    // 短英文字 → 美股：拉騰訊拿名稱
+    if (/^[A-Za-z][A-Za-z0-9.]{0,9}$/.test(raw) && raw.length <= 6) {
+      var us = raw.toUpperCase();
+      var metaUs = await fetchSymbolMeta('us', us);
+      var results2 = metaUs
+        ? [metaUs]
+        : [{ market: 'us', symbol: us, name: NAME_MAP['us:' + us] || us, key: 'us:' + us }];
+      searchCache.set(key, { expiresAt: now + SEARCH_CACHE_TTL_MS, results: results2 });
+      return results2.slice();
+    }
+
+    // 關鍵字：smartbox + 必要時補報價名稱
+    try {
+      var res = await fetch(SMARTBOX_URL + '?v=2&q=' + encodeURIComponent(raw) + '&t=all', {
+        cache: 'no-store',
+        headers: { Accept: '*/*' }
+      });
+      if (!res.ok) throw new Error('search http');
+      var text = decodeGbk(await res.arrayBuffer());
+      var results3 = [];
+      var m = text.match(/"([^"]+)"/);
+      if (m) {
+        m[1].split('^').forEach(function (part) {
+          var segs = part.split('~');
+          if (segs.length < 2) return;
+          var joined = segs.join('|').toLowerCase();
+          var market = null;
+          if (joined.indexOf('hk') !== -1) market = 'hk';
+          else if (joined.indexOf('us') !== -1) market = 'us';
+          if (!market) return;
+          var symbol = null;
+          var name = null;
+          segs.forEach(function (s) {
+            if (market === 'hk' && /^\d{1,5}$/.test(s)) symbol = s.padStart(5, '0');
+            else if (market === 'us' && /^[A-Za-z][A-Za-z0-9.]{0,9}$/.test(s) && s.toLowerCase() !== 'us') {
+              symbol = s.toUpperCase().replace(/\..*$/, '');
+            }
+            if (/[\u4e00-\u9fffA-Za-z]/.test(s) && !/^(hk|us|sh|sz)$/i.test(s) && !/^\d+$/.test(s)) {
+              if (!name || /[\u4e00-\u9fff]/.test(s)) name = s;
+            }
+          });
+          if (symbol) {
+            var display = toTraditional(name || NAME_MAP[market + ':' + symbol] || symbol);
+            if (display && display !== symbol) NAME_MAP[market + ':' + symbol] = display;
+            results3.push({
+              market: market,
+              symbol: symbol,
+              name: display,
+              key: market + ':' + symbol
+            });
+          }
+        });
+      }
+      var seen = {};
+      results3 = results3.filter(function (r) {
+        if (seen[r.key]) return false;
+        seen[r.key] = true;
+        return true;
+      }).slice(0, 12);
+
+      // 仍無名稱的補一次報價
+      var needMeta = results3.filter(function (r) { return !r.name || r.name === r.symbol; }).slice(0, 5);
+      if (needMeta.length) {
+        await Promise.all(needMeta.map(async function (r) {
+          var meta = await fetchSymbolMeta(r.market, r.symbol);
+          if (meta && meta.name) {
+            r.name = meta.name;
+            r.price = meta.price;
+            r.changePct = meta.changePct;
+          }
+        }));
+      }
+
+      searchCache.set(key, { expiresAt: now + SEARCH_CACHE_TTL_MS, results: results3 });
+      return results3.slice();
+    } catch (e) {
+      return [];
+    }
   }
 
   function renderSearchSuggestions(list) {
@@ -1165,13 +1462,26 @@
     }
     el.innerHTML = list.slice(0, 12).map(function (item) {
       var inList = watchlist.some(function (w) { return w.key === item.key; });
+      var displayName = item.name || NAME_MAP[item.key] || item.symbol;
+      var priceHtml = '';
+      if (item.price != null) {
+        var pct = item.changePct;
+        var cls = pct > 0 ? 'up' : (pct < 0 ? 'down' : '');
+        var pctText = pct != null ? ((pct > 0 ? '+' : '') + Number(pct).toFixed(2) + '%') : '';
+        priceHtml =
+          '<div style="text-align:right">' +
+            '<div class="stock-price ' + cls + '" style="font-size:15px">' + formatPrice(item.price, item.market) + '</div>' +
+            (pctText ? '<div class="stock-change ' + cls + '" style="font-size:12px">' + pctText + '</div>' : '') +
+          '</div>';
+      }
       return '<div class="card stock-row" data-market="' + item.market + '" data-symbol="' + escapeHtml(item.symbol) +
-        '" data-name="' + escapeHtml(item.name) + '" tabindex="0" role="button">' +
+        '" data-name="' + escapeHtml(displayName) + '" tabindex="0" role="button">' +
         '<div class="stock-info">' +
-          '<div class="stock-name">' + escapeHtml(item.name) + '</div>' +
+          '<div class="stock-name">' + escapeHtml(displayName) + '</div>' +
           '<div class="stock-code">' + escapeHtml(item.symbol) + ' · ' + item.market.toUpperCase() + '</div>' +
         '</div>' +
-        '<div class="stock-price-block">' +
+        '<div class="stock-price-block" style="display:flex;align-items:center;gap:10px">' +
+          priceHtml +
           '<button class="pill ' + (inList ? '' : 'primary') + '" style="height:36px;font-size:13px" data-act="toggle">' +
             (inList ? '移出' : '加入') +
           '</button></div></div>';
