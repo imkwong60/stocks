@@ -906,8 +906,16 @@
       '<div data-field="meta" style="font-size:13px;color:var(--text-secondary);margin-top:2px">' +
         escapeHtml(q.symbol) + ' · ' + q.market.toUpperCase() + ' · ' + escapeHtml(q.currency || '—') +
       '</div></div>' +
-      '<div class="detail-price" data-field="price" style="margin-top:12px;color:' + priceColor + '">' + formatPrice(q.price, q.market, q.symbol) + '</div>' +
+      '<div style="margin-top:12px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">' +
+        '<div class="detail-price" data-field="price" style="color:' + priceColor + '">' + formatPrice(q.price, q.market, q.symbol) + '</div>' +
+        '<button class="pill primary" id="modal-live-refresh" type="button" style="flex-shrink:0;height:36px;font-size:13px">更新即時報價</button>' +
+      '</div>' +
       '<div class="stock-change ' + ch.cls + '" data-field="change" style="margin-top:6px;display:inline-flex">' + ch.text + '</div>' +
+      '<div style="margin-top:4px;font-size:11px;color:var(--text-tertiary)">' +
+        (q.market === 'hk'
+          ? '即時：iTick（港股／恆生）'
+          : '即時：Twelve Data（美股／美指）') +
+      '</div>' +
       '<div class="detail-grid">' +
       '<div class="detail-item"><label>今開</label><span data-field="open">' + formatPrice(q.open, q.market, q.symbol) + '</span></div>' +
       '<div class="detail-item"><label>昨收</label><span data-field="prev">' + formatPrice(q.prevClose, q.market, q.symbol) + '</span></div>' +
@@ -918,14 +926,8 @@
       '</div>' +
       '<div id="modal-events"><div style="margin-top:16px;color:var(--text-tertiary);font-size:13px">載入企業日程…</div></div>' +
       '<div class="modal-actions">' +
-      '<button class="pill primary" id="modal-live-refresh" type="button">更新即時報價</button>' +
       '<button class="pill ' + (inWatch ? '' : 'primary') + '" id="modal-toggle">' + (inWatch ? '移出自選' : '加入自選') + '</button>' +
-      '<button class="pill ghost" id="modal-close">關閉</button></div>' +
-      '<div style="margin-top:8px;font-size:11px;color:var(--text-tertiary);text-align:center">' +
-        (q.market === 'hk'
-          ? '即時來源：iTick（港股／恆生 · 免費約 5 次／分鐘）'
-          : '即時來源：Twelve Data（美股／美指）') +
-      '</div>';
+      '<button class="pill ghost" id="modal-close">關閉</button></div>';
     document.getElementById('modal-overlay').classList.add('show');
     modal.classList.add('show');
     document.body.classList.add('modal-open');
