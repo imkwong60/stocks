@@ -1166,24 +1166,28 @@
     }
   }
 
+  var newsItemsById = {};
+  var newsReaderOpen = false;
+
   function renderNews(items) {
     var el = document.getElementById('news-content');
     if (!el) return;
+    newsItemsById = {};
     if (!items || !items.length) {
       el.innerHTML = '<div class="empty"><div class="empty-icon">📰</div><p>暫無相關新聞</p>' +
         '<p style="font-size:13px;margin-top:6px;color:var(--text-tertiary)">請先在自選加入股票，或稍後再試</p></div>';
       return;
     }
-    var cards = items.map(function (n) {
+    var cards = items.map(function (n, idx) {
+      var id = 'n' + idx;
+      newsItemsById[id] = n;
       var tag = n.symbol || '';
       var name = n.name || tag;
       var label = name && tag && name !== tag ? (name + ' · ' + tag) : (name || tag);
       var time = formatNewsTime(n.publishedAt || n.time || n.datetime);
       var source = n.source || n.publisher || '新聞';
-      var summary = n.summary || n.description || '';
-      var href = n.url || n.link || '';
-      return '<a class="news-item" href="' + escapeHtml(href || '#') + '" target="_blank" rel="noopener noreferrer"' +
-        (href ? '' : ' onclick="return false;"') + '>' +
+      var summary = n.summary || n.description || n.content || '';
+      return '<article class="news-item" data-news-id="' + id + '" tabindex="0" role="button">' +
         '<div class="news-item-inner">' +
           '<div class="news-top">' +
             (label ? '<span class="news-tag">' + escapeHtml(label) + '</span>' : '<span></span>') +
@@ -1196,11 +1200,154 @@
             '<span class="news-more">閱讀</span>' +
           '</div>' +
         '</div>' +
-      '</a>';
+      '</article>';
     }).join('');
     el.innerHTML =
       '<div class="news-count-hint">共 ' + items.length + ' 則 · 近 3 天 · 僅中文 · 已轉繁體</div>' +
       '<div class="news-list">' + cards + '</div>';
+    el.querySelectorAll('.news-item[data-news-id]').forEach(function (card) {
+      card.addEventListener('click', function () {
+        openNewsReader(card.getAttribute('data-news-id'));
+      });
+      card.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          openNewsReader(card.getAttribute('data-news-id'));
+        }
+      });
+    });
+  }
+
+  function extractArticleText(html) {
+    if (!html) return '';
+    var text = '';
+    try {
+      var doc = new DOMParser().parseFromString(html, 'text/html');
+      var meta = doc.querySelector('meta[name="description"]');
+      if (meta && meta.getAttribute('content')) text = meta.getAttribute('content');
+      var selectors = [
+        '#ContentBody', '#contentBody', '#NewsContentBody', '#articleContent',
+        '.article-body', '.news-content', '.txtinfos', '.content-body',
+        'article', '[class*="article"]', '[class*="content"]'
+      ];
+      var best = '';
+      selectors.forEach(function (sel) {
+        doc.querySelectorAll(sel).forEach(function (node) {
+          var t = (node.textContent || '').replace(/\s+/g, ' ').trim();
+          if (t.length > best.length) best = t;
+        });
+      });
+      if (best.length > text.length) text = best;
+    } catch (e) {}
+    text = stripHtmlTags(text).replace(/\s+/g, ' ').trim();
+    // 去掉常見頁尾雜訊
+    text = text.replace(/東方財富網[^。]{0,40}$/g, '').trim();
+    return text;
+  }
+
+  async function fetchFullNewsBody(item) {
+    var url = item.url || item.link || '';
+    if (!url) return item.summary || item.content || '';
+    // 已有較長正文就不重複抓
+    var local = item.content || item.summary || '';
+    if (local && local.length > 280) return local;
+    var candidates = [url];
+    // 東財可試 wap
+    if (/eastmoney\.com\/a\//i.test(url)) {
+      candidates.unshift(url.replace('finance.eastmoney.com', 'wap.eastmoney.com')
+        .replace('http://', 'https://'));
+    }
+    for (var i = 0; i < candidates.length; i++) {
+      try {
+        var target = candidates[i];
+        var res = await fetch(YAHOO_NEWS_PROXY + target, {
+          cache: 'no-store',
+          headers: { Accept: 'text/html,application/xhtml+xml' }
+        });
+        if (!res.ok) continue;
+        var html = await res.text();
+        var body = extractArticleText(html);
+        if (body && body.length > 60) return toTraditional(body);
+      } catch (e) {}
+    }
+    return toTraditional(local);
+  }
+
+  async function openNewsReader(id) {
+    var item = newsItemsById[id];
+    if (!item) return;
+    var overlay = document.getElementById('news-reader-overlay');
+    var sheet = document.getElementById('news-reader');
+    var body = document.getElementById('news-reader-body');
+    if (!overlay || !sheet || !body) return;
+
+    var tag = item.symbol || '';
+    var name = item.name || tag;
+    var label = name && tag && name !== tag ? (name + ' · ' + tag) : (name || tag);
+    var time = formatNewsTime(item.publishedAt || item.time || item.datetime);
+    var source = item.source || item.publisher || '新聞';
+    var href = item.url || item.link || '';
+
+    body.innerHTML =
+      '<div class="news-reader-meta">' +
+        (label ? '<span class="news-tag">' + escapeHtml(label) + '</span>' : '') +
+        (time ? '<span class="news-time">' + escapeHtml(time) + '</span>' : '') +
+      '</div>' +
+      '<h2 class="news-reader-title">' + escapeHtml(item.title || '') + '</h2>' +
+      '<div class="news-reader-source">' + escapeHtml(source) + '</div>' +
+      '<div class="news-reader-content"><div class="news-reader-loading">載入全文…</div></div>' +
+      '<div class="news-reader-actions">' +
+        (href ? '<a class="pill" href="' + escapeHtml(href) + '" target="_blank" rel="noopener noreferrer">開啟原文</a>' : '') +
+        '<button type="button" class="pill primary" id="news-reader-close-btn">關閉</button>' +
+      '</div>';
+
+    overlay.classList.add('show');
+    sheet.classList.add('show');
+    newsReaderOpen = true;
+    document.body.classList.add('modal-open');
+
+    var closeBtn = document.getElementById('news-reader-close-btn');
+    if (closeBtn) closeBtn.onclick = closeNewsReader;
+
+    var contentEl = body.querySelector('.news-reader-content');
+    try {
+      var full = await fetchFullNewsBody(item);
+      if (!newsReaderOpen) return;
+      if (full) {
+        // 分段顯示
+        var paras = full.split(/(?:\n{2,}|\s{2,}|。\s*)/).filter(function (p) { return p && p.trim(); });
+        // 若切太碎，改用整段
+        if (paras.length <= 1) {
+          contentEl.innerHTML = '<p>' + escapeHtml(full) + '</p>';
+        } else {
+          // 重新用句號組回較自然段落
+          var chunks = full.replace(/([。！？])\s*/g, '$1\n').split('\n').filter(Boolean);
+          contentEl.innerHTML = chunks.map(function (c) {
+            return '<p>' + escapeHtml(c.trim()) + '</p>';
+          }).join('');
+        }
+      } else {
+        contentEl.innerHTML = '<p class="news-reader-empty">暫時無法取得全文，請開啟原文閱讀。</p>';
+      }
+    } catch (e) {
+      if (!newsReaderOpen) return;
+      var fallback = item.summary || item.content || '';
+      contentEl.innerHTML = fallback
+        ? '<p>' + escapeHtml(toTraditional(fallback)) + '</p><p class="news-reader-empty">全文擷取失敗，以上為摘要。</p>'
+        : '<p class="news-reader-empty">暫時無法取得全文，請開啟原文閱讀。</p>';
+    }
+  }
+
+  function closeNewsReader() {
+    var overlay = document.getElementById('news-reader-overlay');
+    var sheet = document.getElementById('news-reader');
+    if (overlay) overlay.classList.remove('show');
+    if (sheet) sheet.classList.remove('show');
+    newsReaderOpen = false;
+    // 若股票詳情 modal 沒開著，才解除 body lock
+    if (!document.getElementById('modal') || !document.getElementById('modal').classList.contains('show')) {
+      document.body.classList.remove('modal-open');
+    }
   }
 
   function toYahooSymbol(market, symbol) {
@@ -1298,6 +1445,7 @@
         source: r.mediaName || '東方財富',
         publishedAt: r.date ? new Date(r.date.replace(/-/g, '/')).toISOString() : null,
         summary: stripHtmlTags(r.content || '').slice(0, 140),
+        content: stripHtmlTags(r.content || ''),
         market: stock.market,
         symbol: stock.symbol,
         name: lookupName(stock.market, stock.symbol)
@@ -2276,7 +2424,14 @@
     showToast('已清空自選');
   });
   document.getElementById('modal-overlay').addEventListener('click', closeModal);
+  var newsOv = document.getElementById('news-reader-overlay');
+  if (newsOv) newsOv.addEventListener('click', closeNewsReader);
   document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && newsReaderOpen) {
+      e.preventDefault();
+      closeNewsReader();
+      return;
+    }
     if (!document.body.classList.contains('modal-open')) return;
     if (e.key === 'Escape') {
       e.preventDefault();
@@ -2348,7 +2503,7 @@
 
   if ('serviceWorker' in navigator) {
     renderAlertSettings();
-  navigator.serviceWorker.register('sw.js?v=41').then(function (reg) {
+  navigator.serviceWorker.register('sw.js?v=42').then(function (reg) {
       try { reg.update(); } catch (e) {}
     }).catch(function () {});
   }
