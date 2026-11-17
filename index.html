@@ -383,12 +383,12 @@
       margin: 0 4px 10px; letter-spacing: -0.1px;
     }
     .news-reader-overlay {
-      position: fixed; inset: 0; background: rgba(40, 30, 20, 0.4); z-index: 170;
+      position: fixed; inset: 0; background: rgba(40, 30, 20, 0.4); z-index: 2100;
       opacity: 0; pointer-events: none; transition: opacity 0.28s;
     }
     .news-reader-overlay.show { opacity: 1; pointer-events: auto; }
     .news-reader {
-      position: fixed; left: 0; right: 0; bottom: 0; z-index: 180;
+      position: fixed; left: 0; right: 0; bottom: 0; z-index: 2200;
       max-height: 88vh; overflow-y: auto; -webkit-overflow-scrolling: touch;
       background: rgba(255, 252, 247, 0.98);
       border: 1px solid var(--glass-border); border-bottom: none;
@@ -501,6 +501,11 @@
     <div class="modal-handle"></div>
     <div id="modal-content"></div>
   </div>
-  <script src="app.js?v=42" defer></script>
+  <div class="news-reader-overlay" id="news-reader-overlay"></div>
+  <div class="news-reader" id="news-reader" role="dialog" aria-modal="true" aria-label="新聞內容">
+    <div class="news-reader-handle"></div>
+    <div id="news-reader-body"></div>
+  </div>
+  <script src="app.js?v=43" defer></script>
 </body>
 </html>
