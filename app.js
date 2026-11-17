@@ -1174,24 +1174,33 @@
         '<p style="font-size:13px;margin-top:6px;color:var(--text-tertiary)">請先在自選加入股票，或稍後再試</p></div>';
       return;
     }
-    el.innerHTML = items.map(function (n) {
-      var tag = n.symbol || n.market || '';
+    var cards = items.map(function (n) {
+      var tag = n.symbol || '';
       var name = n.name || tag;
+      var label = name && tag && name !== tag ? (name + ' · ' + tag) : (name || tag);
       var time = formatNewsTime(n.publishedAt || n.time || n.datetime);
-      var source = n.source || n.publisher || '';
+      var source = n.source || n.publisher || '新聞';
       var summary = n.summary || n.description || '';
       var href = n.url || n.link || '';
       return '<a class="news-item" href="' + escapeHtml(href || '#') + '" target="_blank" rel="noopener noreferrer"' +
         (href ? '' : ' onclick="return false;"') + '>' +
-        '<div class="news-title">' + escapeHtml(n.title || '（無標題）') + '</div>' +
-        '<div class="news-meta">' +
-          (tag ? '<span class="news-tag">' + escapeHtml(name !== tag ? (name + ' · ' + tag) : tag) + '</span>' : '') +
-          (source ? '<span>' + escapeHtml(source) + '</span>' : '') +
-          (time ? '<span>' + escapeHtml(time) + '</span>' : '') +
+        '<div class="news-item-inner">' +
+          '<div class="news-top">' +
+            (label ? '<span class="news-tag">' + escapeHtml(label) + '</span>' : '<span></span>') +
+            (time ? '<span class="news-time">' + escapeHtml(time) + '</span>' : '') +
+          '</div>' +
+          '<div class="news-title">' + escapeHtml(n.title || '（無標題）') + '</div>' +
+          (summary ? '<div class="news-summary">' + escapeHtml(summary) + '</div>' : '') +
+          '<div class="news-footer">' +
+            '<span class="news-source">' + escapeHtml(source) + '</span>' +
+            '<span class="news-more">閱讀</span>' +
+          '</div>' +
         '</div>' +
-        (summary ? '<div class="news-summary">' + escapeHtml(summary) + '</div>' : '') +
       '</a>';
     }).join('');
+    el.innerHTML =
+      '<div class="news-count-hint">共 ' + items.length + ' 則 · 近 3 天 · 僅中文 · 已轉繁體</div>' +
+      '<div class="news-list">' + cards + '</div>';
   }
 
   function toYahooSymbol(market, symbol) {
@@ -1399,13 +1408,17 @@
         });
       }
 
+      var cutoff = Date.now() - 3 * 24 * 3600 * 1000; // 只顯示 3 天內
       list = list.map(function (n) {
         if (n.symbol && n.market) {
           n.name = n.name || lookupName(n.market, n.symbol, n.name);
         }
         return newsToTraditional(n);
       }).filter(function (n) {
-        return n && n.title && hasChinese(n.title);
+        if (!n || !n.title || !hasChinese(n.title)) return false;
+        var ts = new Date(n.publishedAt || n.time || n.datetime || 0).getTime();
+        if (!ts || isNaN(ts)) return false; // 無日期的不顯示，避免混入過舊內容
+        return ts >= cutoff;
       });
       list.sort(function (a, b) {
         var ta = new Date(a.publishedAt || a.time || a.datetime || 0).getTime();
@@ -1417,7 +1430,7 @@
       renderNews(list);
       if (list.length) markUpdatedAt();
       if (!list.length) {
-        el.innerHTML = '<div class="empty"><div class="empty-icon">📰</div><p>暫無相關新聞</p>' +
+        el.innerHTML = '<div class="empty"><div class="empty-icon">📰</div><p>近 3 天暫無相關新聞</p>' +
           '<p style="font-size:13px;margin-top:6px;color:var(--text-tertiary)">可稍後再試，或換一批自選股票</p>' +
           '<button class="pill" type="button" id="btn-news-retry" style="margin-top:12px">重試</button></div>';
         var retryEmpty = document.getElementById('btn-news-retry');
@@ -2335,7 +2348,7 @@
 
   if ('serviceWorker' in navigator) {
     renderAlertSettings();
-  navigator.serviceWorker.register('sw.js?v=39').then(function (reg) {
+  navigator.serviceWorker.register('sw.js?v=41').then(function (reg) {
       try { reg.update(); } catch (e) {}
     }).catch(function () {});
   }
