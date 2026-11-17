@@ -14,7 +14,7 @@
   // 與 Vercel VAPID_PUBLIC_KEY 一致（私鑰只放伺服器）
   var VAPID_PUBLIC_KEY = 'BDwJnz6kxYCrBCyJE47Zk_7SA-FTmyLWw5LVsvnPVdU12gyZDyUOnIoqss0Y_QClvrzYhvb1sMHzesJ8TOXAFqI';
 
-  var MAX_BATCH_SIZE = 20; // 騰訊批量上限（一次刷新）1
+  var MAX_BATCH_SIZE = 20; // 騰訊批量上限（一次刷新）
 
   function lsGet(k, fallback) {
     try { var v = localStorage.getItem(k); return v == null ? fallback : v; } catch (e) { return fallback; }
@@ -1119,6 +1119,123 @@
     }
   }
 
+  var newsCache = { ts: 0, items: [], keys: '' };
+  var newsLoading = false;
+
+  function formatNewsTime(iso) {
+    if (!iso) return '';
+    try {
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return String(iso).slice(0, 16);
+      var now = Date.now();
+      var diff = (now - d.getTime()) / 1000;
+      if (diff < 60) return '剛剛';
+      if (diff < 3600) return Math.floor(diff / 60) + ' 分鐘前';
+      if (diff < 86400) return Math.floor(diff / 3600) + ' 小時前';
+      if (diff < 86400 * 2) return '昨天';
+      return d.toLocaleDateString('zh-Hant', { month: 'numeric', day: 'numeric' }) +
+        ' ' + d.toLocaleTimeString('zh-Hant', { hour: '2-digit', minute: '2-digit', hour12: false });
+    } catch (e) {
+      return '';
+    }
+  }
+
+  function renderNews(items) {
+    var el = document.getElementById('news-content');
+    if (!el) return;
+    if (!items || !items.length) {
+      el.innerHTML = '<div class="empty"><div class="empty-icon">📰</div><p>暫無相關新聞</p>' +
+        '<p style="font-size:13px;margin-top:6px;color:var(--text-tertiary)">請先在自選加入股票，或稍後再試</p></div>';
+      return;
+    }
+    el.innerHTML = items.map(function (n) {
+      var tag = n.symbol || n.market || '';
+      var name = n.name || tag;
+      var time = formatNewsTime(n.publishedAt || n.time || n.datetime);
+      var source = n.source || n.publisher || '';
+      var summary = n.summary || n.description || '';
+      var href = n.url || n.link || '';
+      return '<a class="news-item" href="' + escapeHtml(href || '#') + '" target="_blank" rel="noopener noreferrer"' +
+        (href ? '' : ' onclick="return false;"') + '>' +
+        '<div class="news-title">' + escapeHtml(n.title || '（無標題）') + '</div>' +
+        '<div class="news-meta">' +
+          (tag ? '<span class="news-tag">' + escapeHtml(name !== tag ? (name + ' · ' + tag) : tag) + '</span>' : '') +
+          (source ? '<span>' + escapeHtml(source) + '</span>' : '') +
+          (time ? '<span>' + escapeHtml(time) + '</span>' : '') +
+        '</div>' +
+        (summary ? '<div class="news-summary">' + escapeHtml(summary) + '</div>' : '') +
+      '</a>';
+    }).join('');
+  }
+
+  async function loadNews(force) {
+    var el = document.getElementById('news-content');
+    if (!el) return;
+    var stocks = watchlist.filter(function (w) {
+      return w.symbol && !isIndexSymbol(w.market, w.symbol);
+    });
+    if (!stocks.length) {
+      el.innerHTML = '<div class="empty"><div class="empty-icon">📰</div><p>尚未加入股票</p>' +
+        '<p style="font-size:13px;margin-top:6px;color:var(--text-tertiary)">到「自選」搜尋並加入後，這裡會顯示相關新聞</p></div>';
+      return;
+    }
+    var keys = stocks.map(function (s) { return s.key; }).sort().join(',');
+    var now = Date.now();
+    if (!force && newsCache.keys === keys && newsCache.items.length && (now - newsCache.ts) < 15 * 60 * 1000) {
+      renderNews(newsCache.items);
+      return;
+    }
+    if (newsLoading) return;
+    newsLoading = true;
+    el.innerHTML = '<div class="empty"><div class="empty-icon">📰</div><p>載入新聞中…</p></div>';
+    try {
+      var res = await fetch('/api/market', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        cache: 'no-store',
+        body: JSON.stringify({
+          action: 'news',
+          items: stocks.slice(0, 12).map(function (s) {
+            return { market: s.market, symbol: s.symbol };
+          })
+        })
+      });
+      var payload = await res.json().catch(function () { return {}; });
+      if (!res.ok) throw new Error(payload.error || ('HTTP ' + res.status));
+      var list = [];
+      if (Array.isArray(payload.news)) list = payload.news;
+      else if (Array.isArray(payload.items)) list = payload.items;
+      else if (payload.data && Array.isArray(payload.data)) list = payload.data;
+      // 補上名稱
+      list = list.map(function (n) {
+        var market = n.market || '';
+        var symbol = n.symbol || '';
+        if (symbol && market) {
+          n.name = n.name || lookupName(market, symbol, n.name);
+        }
+        return n;
+      });
+      // 依時間新到舊
+      list.sort(function (a, b) {
+        var ta = new Date(a.publishedAt || a.time || a.datetime || 0).getTime();
+        var tb = new Date(b.publishedAt || b.time || b.datetime || 0).getTime();
+        return (isNaN(tb) ? 0 : tb) - (isNaN(ta) ? 0 : ta);
+      });
+      newsCache = { ts: now, items: list, keys: keys };
+      renderNews(list);
+    } catch (e) {
+      console.warn('loadNews', e);
+      el.innerHTML = '<div class="empty"><div class="empty-icon">📰</div><p>無法載入新聞</p>' +
+        '<p style="font-size:13px;margin-top:6px;color:var(--text-tertiary)">' +
+        escapeHtml(e.message || '請檢查網路或後端 /api/market news 支援') +
+        '</p>' +
+        '<button class="pill" type="button" id="btn-news-retry" style="margin-top:12px">重試</button></div>';
+      var retry = document.getElementById('btn-news-retry');
+      if (retry) retry.onclick = function () { loadNews(true); };
+    } finally {
+      newsLoading = false;
+    }
+  }
 
   async function applyLiveQuote(market, symbol, btn) {
     var key = makeKey(market, symbol);
@@ -1276,6 +1393,7 @@
       showToast('已移除 ' + symbol);
       saveWatchlist();
       if (currentPage === 'watchlist') renderWatchlist(true);
+      if (currentPage === 'news') loadNews(true);
       return;
     }
     watchlist.push({ key: key, symbol: symbol, market: market });
@@ -1283,13 +1401,14 @@
     // 先落地狀態，避免 await 期間關頁丟資料、或 toast 與列表不同步
     saveWatchlist();
     if (currentPage === 'watchlist') renderWatchlist(true);
+    if (currentPage === 'news') loadNews(true);
     // 行情非同步補；失敗不回滾加入
     if (!quotes[key]) {
       fetchQuotes([{ market: market, symbol: symbol }]).then(function (data) {
         if (data[key]) {
           quotes[key] = data[key];
           if (currentPage === 'watchlist') renderWatchlist(false);
-          if (currentPage === 'search') renderPresets();
+          renderPresets();
           if (selectedKey === key) updateModalPrices();
         }
       }).catch(function (err) {
@@ -1311,9 +1430,12 @@
     document.querySelectorAll('.nav-item').forEach(function (n) {
       n.classList.toggle('active', n.dataset.page === page);
     });
-    if (page === 'watchlist') renderWatchlist(true);
+    if (page === 'watchlist') {
+      renderWatchlist(true);
+      updateSearchVisibility();
+    }
     if (page === 'markets') { renderMarkets(true); refresh(); }
-    if (page === 'search') renderPresets();
+    if (page === 'news') loadNews();
     if (page === 'settings') { renderAuthPanel(); renderAlertSettings(); }
   }
 
@@ -1641,8 +1763,20 @@
     }
   }
 
+  function updateSearchVisibility() {
+    var input = document.getElementById('search-input');
+    var hasQuery = input && input.value.trim().length > 0;
+    var resultEl = document.getElementById('search-result');
+    var presetsEl = document.getElementById('presets');
+    var presetsTitle = document.getElementById('presets-title');
+    if (resultEl) resultEl.style.display = hasQuery ? '' : 'none';
+    if (presetsEl) presetsEl.style.display = hasQuery ? '' : 'none';
+    if (presetsTitle) presetsTitle.style.display = hasQuery ? '' : 'none';
+  }
+
   function renderSearchSuggestions(list) {
     var el = document.getElementById('search-result');
+    updateSearchVisibility();
     if (!list || !list.length) {
       el.innerHTML = '<div style="color:var(--text-tertiary);font-size:13px;padding:8px 4px">沒有相符結果</div>';
       return;
@@ -1808,8 +1942,8 @@
     if (searchTimer) clearTimeout(searchTimer);
     if (raw.length < 1) {
       searchSeq += 1; // 作廢在途結果
-      document.getElementById('search-result').innerHTML =
-        '<div style="color:var(--text-tertiary);font-size:13px;padding:8px 4px">輸入代碼或名稱查看建議</div>';
+      document.getElementById('search-result').innerHTML = '';
+      updateSearchVisibility();
       return;
     }
     searchTimer = setTimeout(async function () {
@@ -1895,6 +2029,8 @@
     saveWatchlist();
     renderWatchlist(true);
     renderPresets();
+    newsCache = { ts: 0, items: [], keys: '' };
+    if (currentPage === 'news') loadNews(true);
     showToast('已清空自選');
   });
   document.getElementById('modal-overlay').addEventListener('click', closeModal);
@@ -1928,8 +2064,7 @@
   loadWatchlist();
   renderPresets();
   renderWatchlist(true);
-  document.getElementById('search-result').innerHTML =
-    '<div style="color:var(--text-tertiary);font-size:13px;padding:8px 4px">輸入代碼或名稱查看建議</div>';
+  updateSearchVisibility();
   renderAuthPanel();
 
   // 若本機已綁定 Email，啟動時靜默嘗試載入雲端（不寄信）
@@ -1971,7 +2106,7 @@
 
   if ('serviceWorker' in navigator) {
     renderAlertSettings();
-  navigator.serviceWorker.register('sw.js?v=34').then(function (reg) {
+  navigator.serviceWorker.register('sw.js?v=35').then(function (reg) {
       try { reg.update(); } catch (e) {}
     }).catch(function () {});
   }
