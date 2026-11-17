@@ -1209,9 +1209,23 @@
     return String(s || '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
   }
 
+  function hasChinese(s) {
+    return /[\u4e00-\u9fff]/.test(String(s || ''));
+  }
+
+  function newsToTraditional(n) {
+    if (!n) return n;
+    if (n.title) n.title = toTraditional(stripHtmlTags(n.title));
+    if (n.summary) n.summary = toTraditional(stripHtmlTags(n.summary));
+    if (n.source) n.source = toTraditional(String(n.source));
+    if (n.name) n.name = toTraditional(String(n.name));
+    return n;
+  }
+
   async function fetchYahooNewsForQuery(query, stock) {
+    // Yahoo 多為英文；只保留標題含中文的結果
     var url = 'https://query1.finance.yahoo.com/v1/finance/search?q=' +
-      encodeURIComponent(query) + '&quotesCount=0&newsCount=6&listsCount=0&enableFuzzyQuery=false';
+      encodeURIComponent(query) + '&quotesCount=0&newsCount=8&listsCount=0&enableFuzzyQuery=false';
     var res = await fetch(YAHOO_NEWS_PROXY + url, {
       cache: 'no-store',
       headers: { Accept: 'application/json' }
@@ -1221,7 +1235,7 @@
     var news = (data && data.news) || [];
     return news.map(function (n) {
       var ts = n.providerPublishTime ? n.providerPublishTime * 1000 : null;
-      return {
+      return newsToTraditional({
         title: n.title || '',
         url: n.link || '',
         source: n.publisher || 'Yahoo Finance',
@@ -1230,16 +1244,18 @@
         market: stock.market,
         symbol: stock.symbol,
         name: lookupName(stock.market, stock.symbol)
-      };
-    }).filter(function (n) { return n.title && n.url; });
+      });
+    }).filter(function (n) {
+      return n.title && n.url && hasChinese(n.title);
+    });
   }
 
-  async function fetchEastMoneyNews(stock) {
-    if (stock.market !== 'hk') return [];
-    var code = String(stock.symbol).replace(/\D/g, '').padStart(5, '0');
+  async function fetchEastMoneyNews(stock, keyword) {
+    var kw = keyword || String(stock.symbol).replace(/\D/g, '') || stock.symbol;
+    if (!kw) return [];
     var param = {
       uid: '',
-      keyword: code,
+      keyword: String(kw),
       type: ['cmsArticleWebOld'],
       client: 'web',
       clientType: 'web',
@@ -1249,7 +1265,7 @@
           searchScope: 'default',
           sort: 'default',
           pageIndex: 1,
-          pageSize: 6,
+          pageSize: 8,
           preTag: '',
           postTag: ''
         }
@@ -1267,17 +1283,19 @@
     return rows.map(function (r) {
       var link = r.url || '';
       if (link && link.indexOf('http') !== 0) link = 'https://finance.eastmoney.com/a/' + (r.code || '') + '.html';
-      return {
+      return newsToTraditional({
         title: stripHtmlTags(r.title),
         url: link,
         source: r.mediaName || '東方財富',
         publishedAt: r.date ? new Date(r.date.replace(/-/g, '/')).toISOString() : null,
-        summary: stripHtmlTags(r.content || '').slice(0, 120),
+        summary: stripHtmlTags(r.content || '').slice(0, 140),
         market: stock.market,
         symbol: stock.symbol,
         name: lookupName(stock.market, stock.symbol)
-      };
-    }).filter(function (n) { return n.title; });
+      });
+    }).filter(function (n) {
+      return n.title && hasChinese(n.title);
+    });
   }
 
   async function fetchNewsForStock(stock) {
@@ -1285,29 +1303,39 @@
     var seen = {};
     function pushAll(arr) {
       (arr || []).forEach(function (n) {
+        if (!n || !hasChinese(n.title)) return;
         var k = (n.url || n.title || '').toLowerCase();
         if (!k || seen[k]) return;
         seen[k] = true;
-        collected.push(n);
+        collected.push(newsToTraditional(n));
       });
     }
     var name = lookupName(stock.market, stock.symbol);
-    var ySym = toYahooSymbol(stock.market, stock.symbol);
-    var queries = [];
-    if (ySym) queries.push(ySym);
-    if (name && name !== stock.symbol) queries.push(name);
-    if (stock.market === 'us') queries.push(stock.symbol);
-
     var tasks = [];
-    queries.slice(0, 2).forEach(function (q) {
-      tasks.push(fetchYahooNewsForQuery(q, stock).catch(function () { return []; }));
-    });
+
+    // 主來源：東方財富（中文）—— 代碼 + 中文名
     if (stock.market === 'hk') {
-      tasks.push(fetchEastMoneyNews(stock).catch(function () { return []; }));
+      var code = String(stock.symbol).replace(/\D/g, '').padStart(5, '0');
+      tasks.push(fetchEastMoneyNews(stock, code).catch(function () { return []; }));
     }
+    if (name && hasChinese(name)) {
+      tasks.push(fetchEastMoneyNews(stock, name).catch(function () { return []; }));
+    } else if (stock.market === 'us') {
+      // 美股無中文名時仍用英文代碼搜中文媒體
+      tasks.push(fetchEastMoneyNews(stock, stock.symbol).catch(function () { return []; }));
+    }
+
+    // 輔來源：Yahoo 僅保留中文標題（通常很少）
+    var ySym = toYahooSymbol(stock.market, stock.symbol);
+    if (name && hasChinese(name)) {
+      tasks.push(fetchYahooNewsForQuery(name, stock).catch(function () { return []; }));
+    } else if (ySym) {
+      tasks.push(fetchYahooNewsForQuery(ySym, stock).catch(function () { return []; }));
+    }
+
     var parts = await Promise.all(tasks);
     parts.forEach(pushAll);
-    return collected.slice(0, 8);
+    return collected.slice(0, 10);
   }
 
   async function loadNews(force) {
@@ -1375,7 +1403,9 @@
         if (n.symbol && n.market) {
           n.name = n.name || lookupName(n.market, n.symbol, n.name);
         }
-        return n;
+        return newsToTraditional(n);
+      }).filter(function (n) {
+        return n && n.title && hasChinese(n.title);
       });
       list.sort(function (a, b) {
         var ta = new Date(a.publishedAt || a.time || a.datetime || 0).getTime();
@@ -2305,7 +2335,7 @@
 
   if ('serviceWorker' in navigator) {
     renderAlertSettings();
-  navigator.serviceWorker.register('sw.js?v=38').then(function (reg) {
+  navigator.serviceWorker.register('sw.js?v=39').then(function (reg) {
       try { reg.update(); } catch (e) {}
     }).catch(function () {});
   }
