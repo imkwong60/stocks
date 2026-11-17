@@ -69,7 +69,7 @@
       { symbol: 'MSFT', name: '微軟' },
       { symbol: 'AMZN', name: '亞馬遜' },
       { symbol: 'GOOGL', name: 'Alphabet' },
-      { symbol: 'META', name: 'Meta' },
+      { symbol: 'META', name: 'Meta' }, // 搜尋用 US_NEWS_EXTRA
       { symbol: 'AMD', name: '超微半導體' },
       { symbol: 'BRK.B', name: '波克夏B' },
       { symbol: 'TSM', name: '台積電' }
@@ -269,18 +269,32 @@
     AMZN: ['亚马逊'],
     GOOGL: ['谷歌', 'Alphabet'],
     GOOG: ['谷歌', 'Alphabet'],
-    META: ['Meta', '脸书'],
+    META: ['Meta', '元宇宙'],
     AMD: ['AMD'],
     'BRK.B': ['伯克希尔'],
+    BRK_B: ['伯克希尔'],
     TSM: ['台积电'],
     INTC: ['英特尔'],
-    NFLX: ['奈飞', '网飞'],
+    NFLX: ['奈飞'],
     BABA: ['阿里巴巴'],
     PDD: ['拼多多'],
     BIDU: ['百度'],
     NIO: ['蔚来'],
     XPEV: ['小鹏'],
-    LI: ['理想汽车']
+    LI: ['理想汽车'],
+    SPCX: ['SpaceX'],
+    SPACE: ['SpaceX'],
+    PLTR: ['Palantir'],
+    AVGO: ['博通'],
+    ORCL: ['甲骨文'],
+    CRM: ['Salesforce'],
+    COIN: ['Coinbase'],
+    HOOD: ['Robinhood'],
+    QCOM: ['高通'],
+    MU: ['美光'],
+    ARM: ['Arm'],
+    SMCI: ['超微电脑'],
+    ASML: ['ASML']
   };
 
   function lookupName(market, symbol, rawName) {
@@ -1474,7 +1488,7 @@
           searchScope: 'default',
           sort: 'default',
           pageIndex: 1,
-          pageSize: 8,
+          pageSize: 12,
           preTag: '',
           postTag: ''
         }
@@ -1496,7 +1510,18 @@
         title: stripHtmlTags(r.title),
         url: link,
         source: r.mediaName || '東方財富',
-        publishedAt: r.date ? new Date(r.date.replace(/-/g, '/')).toISOString() : null,
+        publishedAt: (function () {
+          if (!r.date) return null;
+          var raw = String(r.date).trim();
+          // 2026-11-17 08:34:00
+          var m = raw.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/);
+          if (m) {
+            var d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6] || 0));
+            if (!isNaN(d.getTime())) return d.toISOString();
+          }
+          var d2 = new Date(raw.replace(/-/g, '/'));
+          return isNaN(d2.getTime()) ? null : d2.toISOString();
+        })(),
         summary: stripHtmlTags(r.content || '').slice(0, 140),
         content: stripHtmlTags(r.content || ''),
         market: stock.market,
@@ -1526,7 +1551,7 @@
 
     function addKw(k) {
       k = String(k || '').trim();
-      if (!k) return;
+      if (!k || k.length < 2) return;
       if (keywords.indexOf(k) >= 0) return;
       keywords.push(k);
     }
@@ -1535,30 +1560,31 @@
       var code = String(stock.symbol).replace(/\D/g, '').padStart(5, '0');
       addKw(code);
       if (name) {
-        addKw(name);
         addKw(toSimplifiedForSearch(name));
+        addKw(name);
       }
     } else {
-      // 美股：簡體中文名 + 代碼（東財對簡體命中更好）
-      addKw(stock.symbol);
+      // 美股：中文／品牌名優先，英文代碼最後（代碼結果常偏舊）
+      var sym = String(stock.symbol || '').toUpperCase();
+      var extras = US_NEWS_EXTRA_KEYWORDS[sym] ||
+        US_NEWS_EXTRA_KEYWORDS[sym.replace('.', '_')] ||
+        US_NEWS_EXTRA_KEYWORDS[sym.replace('-', '.')] || [];
+      extras.forEach(addKw);
       if (name && name !== stock.symbol) {
-        addKw(toSimplifiedForSearch(name));
+        var sc = toSimplifiedForSearch(name);
+        if (hasChinese(sc)) addKw(sc);
         if (hasChinese(name)) addKw(name);
+        // Meta / SpaceX 等英文品牌名也可搜到中文報導
+        if (/^[A-Za-z][A-Za-z0-9.& -]{1,20}$/.test(name)) addKw(name);
       }
-      var extras = US_NEWS_EXTRA_KEYWORDS[String(stock.symbol).toUpperCase()] ||
-                   US_NEWS_EXTRA_KEYWORDS[String(stock.symbol).toUpperCase().replace('-', '.')];
-      if (extras) extras.forEach(addKw);
+      // 代碼放最後；SpaceX 類用品牌比代碼好
+      if (sym && sym.length <= 5 && !/^SPCX$/i.test(sym)) addKw(sym);
     }
 
+    // 最多 3 個關鍵字，已按優先序
     keywords.slice(0, 3).forEach(function (kw) {
       tasks.push(fetchEastMoneyNews(stock, kw).catch(function () { return []; }));
     });
-
-    // Yahoo 僅保留中文標題
-    if (name && hasChinese(name)) {
-      tasks.push(fetchYahooNewsForQuery(toSimplifiedForSearch(name), stock).catch(function () { return []; }));
-      tasks.push(fetchYahooNewsForQuery(name, stock).catch(function () { return []; }));
-    }
 
     var parts = await Promise.all(tasks);
     parts.forEach(pushAll);
@@ -1611,7 +1637,7 @@
       }
 
       if (!list.length) {
-        var batch = stocks.slice(0, 8);
+        var batch = stocks.slice(0, 15);
         var results = await Promise.all(batch.map(function (s) {
           return fetchNewsForStock(s).catch(function () { return []; });
         }));
@@ -2583,7 +2609,7 @@
 
   if ('serviceWorker' in navigator) {
     renderAlertSettings();
-  navigator.serviceWorker.register('sw.js?v=44').then(function (reg) {
+  navigator.serviceWorker.register('sw.js?v=45').then(function (reg) {
       try { reg.update(); } catch (e) {}
     }).catch(function () {});
   }
