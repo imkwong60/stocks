@@ -8,6 +8,7 @@
   var SESSION_TOAST_KEY = 'quote_session_toasts_v1';
   var QUOTE_ROTATION_KEY = 'quote_rotation_offset_v1';
   var ALERT_PCT_THRESHOLD = 5;
+  var LIVE_HOLD_MS = 120000; // 閃電即時報價保留 2 分鐘，避免被騰訊批量覆蓋
   var ALERT_ENABLED_KEY = 'quote_alert_enabled_v1';
   var ALERT_LOG_KEY = 'quote_alert_log_v1';
   var PUSH_REG_ID = 'quote_push_registry_v1';
@@ -583,7 +584,9 @@
       change: change != null ? change : (prev != null ? close - prev : null),
       changePct: percent,
       currency: currency,
-      time: datetime
+      time: datetime,
+      source: 'tencent',
+      fetchedAt: Date.now()
     };
   }
 
@@ -871,10 +874,12 @@
         '</div>' + dragHandle + '</div>';
     }
     var ch = formatChange(q.change, q.changePct, q.market);
+    var isLive = q.source === 'live' && q.fetchedAt && (Date.now() - q.fetchedAt) < LIVE_HOLD_MS;
+    var liveMark = isLive ? '<span class="live-badge" data-field="live">即時</span>' : '';
     return '<div class="card stock-row" data-key="' + escapeHtml(q.key) + '" data-market="' + escapeHtml(q.market) +
       '" data-symbol="' + escapeHtml(q.symbol) + '" tabindex="0" role="button">' +
       '<div class="stock-info"><div class="stock-name" data-field="name">' + escapeHtml(q.name) + '</div>' +
-      '<div class="stock-code">' + escapeHtml(q.symbol) + ' · ' + q.market.toUpperCase() + '</div></div>' +
+      '<div class="stock-code">' + escapeHtml(q.symbol) + ' · ' + q.market.toUpperCase() + liveMark + '</div></div>' +
       '<div class="stock-price-block" style="display:flex;align-items:center;gap:8px;justify-content:flex-end">' +
         '<div style="text-align:right"><div class="stock-price" data-field="price">' + formatPrice(q.price, q.market, q.symbol) + '</div>' +
         '<div class="stock-change ' + ch.cls + '" data-field="change">' + ch.text + '</div></div>' +
@@ -905,6 +910,20 @@
       changeEl.textContent = ch.text;
       changeEl.className = 'stock-change ' + ch.cls;
       if (nameEl && nameEl.textContent !== q.name) nameEl.textContent = q.name;
+      var codeEl = row.querySelector('.stock-code');
+      if (codeEl) {
+        var isLive = q.source === 'live' && q.fetchedAt && (Date.now() - q.fetchedAt) < LIVE_HOLD_MS;
+        var badge = codeEl.querySelector('[data-field="live"]');
+        if (isLive && !badge) {
+          var span = document.createElement('span');
+          span.className = 'live-badge';
+          span.setAttribute('data-field', 'live');
+          span.textContent = '即時';
+          codeEl.appendChild(span);
+        } else if (!isLive && badge) {
+          badge.remove();
+        }
+      }
     }
     return true;
   }
@@ -999,6 +1018,12 @@
       var el = root.querySelector('[data-field="' + k + '"]');
       if (el) el.textContent = map[k];
     });
+    var srcNote = root.querySelector('[data-field="src-note"]');
+    if (srcNote) {
+      srcNote.textContent = q.source === 'live'
+        ? ('即時報價 · ' + (q.liveSource === 'itick' || q.market === 'hk' ? 'iTick' : 'Twelve Data') + '（約 2 分鐘內不會被列表覆蓋）')
+        : '列表：騰訊財經 · 可按「更新即時報價」';
+    }
     var toggle = document.getElementById('modal-toggle');
     if (toggle) {
       var inWatch = watchlist.some(function (w) { return w.key === selectedKey; });
@@ -1121,6 +1146,7 @@
 
   var newsCache = { ts: 0, items: [], keys: '' };
   var newsLoading = false;
+  var YAHOO_NEWS_PROXY = 'https://proxy.cors.dev/';
 
   function formatNewsTime(iso) {
     if (!iso) return '';
@@ -1168,6 +1194,122 @@
     }).join('');
   }
 
+  function toYahooSymbol(market, symbol) {
+    var sym = String(symbol || '').toUpperCase();
+    if (market === 'hk') {
+      var digits = sym.replace(/\D/g, '');
+      if (!digits) return null;
+      return digits.replace(/^0+/, '') + '.HK';
+    }
+    if (sym === 'BRK.B') return 'BRK-B';
+    return sym.replace(/^\./, '');
+  }
+
+  function stripHtmlTags(s) {
+    return String(s || '').replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
+  }
+
+  async function fetchYahooNewsForQuery(query, stock) {
+    var url = 'https://query1.finance.yahoo.com/v1/finance/search?q=' +
+      encodeURIComponent(query) + '&quotesCount=0&newsCount=6&listsCount=0&enableFuzzyQuery=false';
+    var res = await fetch(YAHOO_NEWS_PROXY + url, {
+      cache: 'no-store',
+      headers: { Accept: 'application/json' }
+    });
+    if (!res.ok) throw new Error('Yahoo HTTP ' + res.status);
+    var data = await res.json();
+    var news = (data && data.news) || [];
+    return news.map(function (n) {
+      var ts = n.providerPublishTime ? n.providerPublishTime * 1000 : null;
+      return {
+        title: n.title || '',
+        url: n.link || '',
+        source: n.publisher || 'Yahoo Finance',
+        publishedAt: ts ? new Date(ts).toISOString() : null,
+        summary: '',
+        market: stock.market,
+        symbol: stock.symbol,
+        name: lookupName(stock.market, stock.symbol)
+      };
+    }).filter(function (n) { return n.title && n.url; });
+  }
+
+  async function fetchEastMoneyNews(stock) {
+    if (stock.market !== 'hk') return [];
+    var code = String(stock.symbol).replace(/\D/g, '').padStart(5, '0');
+    var param = {
+      uid: '',
+      keyword: code,
+      type: ['cmsArticleWebOld'],
+      client: 'web',
+      clientType: 'web',
+      clientVersion: 'curr',
+      param: {
+        cmsArticleWebOld: {
+          searchScope: 'default',
+          sort: 'default',
+          pageIndex: 1,
+          pageSize: 6,
+          preTag: '',
+          postTag: ''
+        }
+      }
+    };
+    var url = 'https://search-api-web.eastmoney.com/search/jsonp?cb=jQuery&param=' +
+      encodeURIComponent(JSON.stringify(param)) + '&_=' + Date.now();
+    var res = await fetch(url, { cache: 'no-store', headers: { Accept: '*/*' } });
+    if (!res.ok) throw new Error('EastMoney HTTP ' + res.status);
+    var text = await res.text();
+    var m = text.match(/jQuery\((.*)\)\s*$/);
+    if (!m) return [];
+    var data = JSON.parse(m[1]);
+    var rows = (((data || {}).result || {}).cmsArticleWebOld) || [];
+    return rows.map(function (r) {
+      var link = r.url || '';
+      if (link && link.indexOf('http') !== 0) link = 'https://finance.eastmoney.com/a/' + (r.code || '') + '.html';
+      return {
+        title: stripHtmlTags(r.title),
+        url: link,
+        source: r.mediaName || '東方財富',
+        publishedAt: r.date ? new Date(r.date.replace(/-/g, '/')).toISOString() : null,
+        summary: stripHtmlTags(r.content || '').slice(0, 120),
+        market: stock.market,
+        symbol: stock.symbol,
+        name: lookupName(stock.market, stock.symbol)
+      };
+    }).filter(function (n) { return n.title; });
+  }
+
+  async function fetchNewsForStock(stock) {
+    var collected = [];
+    var seen = {};
+    function pushAll(arr) {
+      (arr || []).forEach(function (n) {
+        var k = (n.url || n.title || '').toLowerCase();
+        if (!k || seen[k]) return;
+        seen[k] = true;
+        collected.push(n);
+      });
+    }
+    var name = lookupName(stock.market, stock.symbol);
+    var ySym = toYahooSymbol(stock.market, stock.symbol);
+    var queries = [];
+    if (ySym) queries.push(ySym);
+    if (name && name !== stock.symbol) queries.push(name);
+    if (stock.market === 'us') queries.push(stock.symbol);
+
+    var tasks = [];
+    queries.slice(0, 2).forEach(function (q) {
+      tasks.push(fetchYahooNewsForQuery(q, stock).catch(function () { return []; }));
+    });
+    if (stock.market === 'hk') {
+      tasks.push(fetchEastMoneyNews(stock).catch(function () { return []; }));
+    }
+    var parts = await Promise.all(tasks);
+    parts.forEach(pushAll);
+    return collected.slice(0, 8);
+  }
+
   async function loadNews(force) {
     var el = document.getElementById('news-content');
     if (!el) return;
@@ -1189,45 +1331,73 @@
     newsLoading = true;
     el.innerHTML = '<div class="empty"><div class="empty-icon">📰</div><p>載入新聞中…</p></div>';
     try {
-      var res = await fetch('/api/market', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        cache: 'no-store',
-        body: JSON.stringify({
-          action: 'news',
-          items: stocks.slice(0, 12).map(function (s) {
-            return { market: s.market, symbol: s.symbol };
-          })
-        })
-      });
-      var payload = await res.json().catch(function () { return {}; });
-      if (!res.ok) throw new Error(payload.error || ('HTTP ' + res.status));
+      // 先試後端（若有），失敗則改客戶端抓 Yahoo／東方財富
       var list = [];
-      if (Array.isArray(payload.news)) list = payload.news;
-      else if (Array.isArray(payload.items)) list = payload.items;
-      else if (payload.data && Array.isArray(payload.data)) list = payload.data;
-      // 補上名稱
+      try {
+        var res = await fetch('/api/market', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          cache: 'no-store',
+          body: JSON.stringify({
+            action: 'news',
+            items: stocks.slice(0, 12).map(function (s) {
+              return { market: s.market, symbol: s.symbol };
+            })
+          })
+        });
+        if (res.ok) {
+          var payload = await res.json().catch(function () { return {}; });
+          if (Array.isArray(payload.news)) list = payload.news;
+          else if (Array.isArray(payload.items)) list = payload.items;
+          else if (payload.data && Array.isArray(payload.data)) list = payload.data;
+        }
+      } catch (apiErr) {
+        /* 後端不可用時走客戶端 */
+      }
+
+      if (!list.length) {
+        var batch = stocks.slice(0, 8);
+        var results = await Promise.all(batch.map(function (s) {
+          return fetchNewsForStock(s).catch(function () { return []; });
+        }));
+        var seen = {};
+        results.forEach(function (arr) {
+          arr.forEach(function (n) {
+            var k = (n.url || n.title || '').toLowerCase();
+            if (!k || seen[k]) return;
+            seen[k] = true;
+            list.push(n);
+          });
+        });
+      }
+
       list = list.map(function (n) {
-        var market = n.market || '';
-        var symbol = n.symbol || '';
-        if (symbol && market) {
-          n.name = n.name || lookupName(market, symbol, n.name);
+        if (n.symbol && n.market) {
+          n.name = n.name || lookupName(n.market, n.symbol, n.name);
         }
         return n;
       });
-      // 依時間新到舊
       list.sort(function (a, b) {
         var ta = new Date(a.publishedAt || a.time || a.datetime || 0).getTime();
         var tb = new Date(b.publishedAt || b.time || b.datetime || 0).getTime();
         return (isNaN(tb) ? 0 : tb) - (isNaN(ta) ? 0 : ta);
       });
+      list = list.slice(0, 40);
       newsCache = { ts: now, items: list, keys: keys };
       renderNews(list);
+      if (list.length) markUpdatedAt();
+      if (!list.length) {
+        el.innerHTML = '<div class="empty"><div class="empty-icon">📰</div><p>暫無相關新聞</p>' +
+          '<p style="font-size:13px;margin-top:6px;color:var(--text-tertiary)">可稍後再試，或換一批自選股票</p>' +
+          '<button class="pill" type="button" id="btn-news-retry" style="margin-top:12px">重試</button></div>';
+        var retryEmpty = document.getElementById('btn-news-retry');
+        if (retryEmpty) retryEmpty.onclick = function () { loadNews(true); };
+      }
     } catch (e) {
       console.warn('loadNews', e);
       el.innerHTML = '<div class="empty"><div class="empty-icon">📰</div><p>無法載入新聞</p>' +
         '<p style="font-size:13px;margin-top:6px;color:var(--text-tertiary)">' +
-        escapeHtml(e.message || '請檢查網路或後端 /api/market news 支援') +
+        escapeHtml(e.message || '請檢查網路連線') +
         '</p>' +
         '<button class="pill" type="button" id="btn-news-retry" style="margin-top:12px">重試</button></div>';
       var retry = document.getElementById('btn-news-retry');
@@ -1271,7 +1441,9 @@
         changePct: num(raw.percent_change),
         currency: raw.currency || (market === 'hk' ? 'HKD' : 'USD'),
         time: raw.datetime || new Date().toISOString(),
-        source: raw.source || (market === 'hk' ? 'itick' : 'twelve')
+        source: 'live',
+        liveSource: raw.source || (market === 'hk' ? 'itick' : 'twelve'),
+        fetchedAt: Date.now()
       };
       if (quotes[key].change == null && quotes[key].price != null && quotes[key].prevClose != null) {
         quotes[key].change = quotes[key].price - quotes[key].prevClose;
@@ -1325,10 +1497,10 @@
         '<button class="pill primary" id="modal-live-refresh" type="button" style="flex-shrink:0;height:36px;font-size:13px">更新即時報價</button>' +
       '</div>' +
       '<div class="stock-change ' + ch.cls + '" data-field="change" style="margin-top:6px;display:inline-flex">' + ch.text + '</div>' +
-      '<div style="margin-top:4px;font-size:11px;color:var(--text-tertiary)">' +
-        (q.market === 'hk'
-          ? '即時：iTick（港股／恆生）'
-          : '即時：Twelve Data（美股／美指）') +
+      '<div style="margin-top:4px;font-size:11px;color:var(--text-tertiary)" data-field="src-note">' +
+        (q.source === 'live'
+          ? ('即時報價 · ' + (q.liveSource === 'itick' || q.market === 'hk' ? 'iTick' : 'Twelve Data') + '（約 2 分鐘內不會被列表覆蓋）')
+          : (q.market === 'hk' ? '列表：騰訊財經 · 可按「更新即時報價」' : '列表：騰訊財經 · 可按「更新即時報價」')) +
       '</div>' +
       '<div class="detail-grid">' +
       '<div class="detail-item"><label>今開</label><span data-field="open">' + formatPrice(q.open, q.market, q.symbol) + '</span></div>' +
@@ -1437,6 +1609,11 @@
     if (page === 'markets') { renderMarkets(true); refresh(); }
     if (page === 'news') loadNews();
     if (page === 'settings') { renderAuthPanel(); renderAlertSettings(); }
+    var refreshBtn = document.getElementById('btn-refresh');
+    if (refreshBtn) {
+      refreshBtn.setAttribute('aria-label', page === 'news' ? '更新新聞' : '重新整理');
+      refreshBtn.title = page === 'news' ? '更新新聞' : '重新整理';
+    }
   }
 
   function collectNeeded() {
@@ -1487,7 +1664,23 @@
     var hasMore = needed.length > batch.length;
     try {
       var data = await fetchQuotes(batch);
-      Object.keys(data).forEach(function (k) { quotes[k] = data[k]; });
+      Object.keys(data).forEach(function (k) {
+        var existing = quotes[k];
+        var incoming = data[k];
+        // 保留剛用閃電取得的即時報價，避免被騰訊延遲價蓋掉
+        if (existing && existing.source === 'live' && existing.fetchedAt &&
+            (Date.now() - existing.fetchedAt) < LIVE_HOLD_MS) {
+          // 仍可補名稱／成交量等非價格欄位
+          if (incoming) {
+            if (incoming.name && (!existing.name || existing.name === existing.symbol)) {
+              existing.name = incoming.name;
+            }
+            if (incoming.volume && !existing.volume) existing.volume = incoming.volume;
+          }
+          return;
+        }
+        quotes[k] = incoming;
+      });
       checkPriceAlerts(data);
       consecutiveFails = 0;
       hasFetchedOnce = true;
@@ -1911,6 +2104,12 @@
     item.addEventListener('click', function () { switchPage(item.dataset.page); });
   });
   document.getElementById('btn-refresh').addEventListener('click', function () {
+    if (currentPage === 'news') {
+      if (newsLoading) { showToast('更新中…', 1800, 'warn'); return; }
+      loadNews(true);
+      showToast('正在更新新聞', 1800, 'warn');
+      return;
+    }
     if (inFlight) { showToast('更新中…', 1800, 'warn'); return; }
     consecutiveFails = 0;
     startPolling();
@@ -2106,7 +2305,7 @@
 
   if ('serviceWorker' in navigator) {
     renderAlertSettings();
-  navigator.serviceWorker.register('sw.js?v=35').then(function (reg) {
+  navigator.serviceWorker.register('sw.js?v=38').then(function (reg) {
       try { reg.update(); } catch (e) {}
     }).catch(function () {});
   }
