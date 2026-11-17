@@ -241,6 +241,48 @@
     return out;
   }
 
+  // 新聞搜尋用：東方財富對簡體關鍵字命中率更高
+  function toSimplifiedForSearch(name) {
+    if (!name) return name;
+    var out = String(name);
+    Object.keys(SC2TC).forEach(function (sc) {
+      var tc = SC2TC[sc];
+      if (tc && out.indexOf(tc) !== -1) out = out.split(tc).join(sc);
+    });
+    // 常見美股繁體名兜底
+    out = out
+      .replace(/蘋果/g, '苹果')
+      .replace(/輝達/g, '英伟达')
+      .replace(/微軟/g, '微软')
+      .replace(/亞馬遜/g, '亚马逊')
+      .replace(/波克夏/g, '伯克希尔')
+      .replace(/台積電/g, '台积电')
+      .replace(/超微半導體/g, 'AMD');
+    return out;
+  }
+
+  var US_NEWS_EXTRA_KEYWORDS = {
+    AAPL: ['苹果', '苹果公司'],
+    NVDA: ['英伟达'],
+    TSLA: ['特斯拉'],
+    MSFT: ['微软'],
+    AMZN: ['亚马逊'],
+    GOOGL: ['谷歌', 'Alphabet'],
+    GOOG: ['谷歌', 'Alphabet'],
+    META: ['Meta', '脸书'],
+    AMD: ['AMD'],
+    'BRK.B': ['伯克希尔'],
+    TSM: ['台积电'],
+    INTC: ['英特尔'],
+    NFLX: ['奈飞', '网飞'],
+    BABA: ['阿里巴巴'],
+    PDD: ['拼多多'],
+    BIDU: ['百度'],
+    NIO: ['蔚来'],
+    XPEV: ['小鹏'],
+    LI: ['理想汽车']
+  };
+
   function lookupName(market, symbol, rawName) {
     var key = makeKey(market, symbol);
     if (NAME_MAP[key]) return NAME_MAP[key];
@@ -1480,30 +1522,47 @@
     }
     var name = lookupName(stock.market, stock.symbol);
     var tasks = [];
+    var keywords = [];
 
-    // 主來源：東方財富（中文）—— 代碼 + 中文名
+    function addKw(k) {
+      k = String(k || '').trim();
+      if (!k) return;
+      if (keywords.indexOf(k) >= 0) return;
+      keywords.push(k);
+    }
+
     if (stock.market === 'hk') {
       var code = String(stock.symbol).replace(/\D/g, '').padStart(5, '0');
-      tasks.push(fetchEastMoneyNews(stock, code).catch(function () { return []; }));
-    }
-    if (name && hasChinese(name)) {
-      tasks.push(fetchEastMoneyNews(stock, name).catch(function () { return []; }));
-    } else if (stock.market === 'us') {
-      // 美股無中文名時仍用英文代碼搜中文媒體
-      tasks.push(fetchEastMoneyNews(stock, stock.symbol).catch(function () { return []; }));
+      addKw(code);
+      if (name) {
+        addKw(name);
+        addKw(toSimplifiedForSearch(name));
+      }
+    } else {
+      // 美股：簡體中文名 + 代碼（東財對簡體命中更好）
+      addKw(stock.symbol);
+      if (name && name !== stock.symbol) {
+        addKw(toSimplifiedForSearch(name));
+        if (hasChinese(name)) addKw(name);
+      }
+      var extras = US_NEWS_EXTRA_KEYWORDS[String(stock.symbol).toUpperCase()] ||
+                   US_NEWS_EXTRA_KEYWORDS[String(stock.symbol).toUpperCase().replace('-', '.')];
+      if (extras) extras.forEach(addKw);
     }
 
-    // 輔來源：Yahoo 僅保留中文標題（通常很少）
-    var ySym = toYahooSymbol(stock.market, stock.symbol);
+    keywords.slice(0, 3).forEach(function (kw) {
+      tasks.push(fetchEastMoneyNews(stock, kw).catch(function () { return []; }));
+    });
+
+    // Yahoo 僅保留中文標題
     if (name && hasChinese(name)) {
+      tasks.push(fetchYahooNewsForQuery(toSimplifiedForSearch(name), stock).catch(function () { return []; }));
       tasks.push(fetchYahooNewsForQuery(name, stock).catch(function () { return []; }));
-    } else if (ySym) {
-      tasks.push(fetchYahooNewsForQuery(ySym, stock).catch(function () { return []; }));
     }
 
     var parts = await Promise.all(tasks);
     parts.forEach(pushAll);
-    return collected.slice(0, 10);
+    return collected.slice(0, 12);
   }
 
   async function loadNews(force) {
@@ -2524,7 +2583,7 @@
 
   if ('serviceWorker' in navigator) {
     renderAlertSettings();
-  navigator.serviceWorker.register('sw.js?v=43').then(function (reg) {
+  navigator.serviceWorker.register('sw.js?v=44').then(function (reg) {
       try { reg.update(); } catch (e) {}
     }).catch(function () {});
   }
