@@ -1275,11 +1275,22 @@
 
   async function openNewsReader(id) {
     var item = newsItemsById[id];
-    if (!item) return;
+    if (!item) {
+      showToast('無法開啟此則新聞', 2000, 'warn');
+      return;
+    }
     var overlay = document.getElementById('news-reader-overlay');
     var sheet = document.getElementById('news-reader');
     var body = document.getElementById('news-reader-body');
-    if (!overlay || !sheet || !body) return;
+    if (!overlay || !sheet || !body) {
+      // DOM 缺失時退回原文
+      if (item.url || item.link) {
+        window.open(item.url || item.link, '_blank', 'noopener,noreferrer');
+      } else {
+        showToast('閱讀面板未就緒', 2000, 'error');
+      }
+      return;
+    }
 
     var tag = item.symbol || '';
     var name = item.name || tag;
@@ -2424,6 +2435,16 @@
     showToast('已清空自選');
   });
   document.getElementById('modal-overlay').addEventListener('click', closeModal);
+  // 新聞卡片事件委派（避免重繪後點擊失效）
+  var newsContentEl = document.getElementById('news-content');
+  if (newsContentEl) {
+    newsContentEl.addEventListener('click', function (e) {
+      var card = e.target.closest('.news-item[data-news-id]');
+      if (!card) return;
+      e.preventDefault();
+      openNewsReader(card.getAttribute('data-news-id'));
+    });
+  }
   var newsOv = document.getElementById('news-reader-overlay');
   if (newsOv) newsOv.addEventListener('click', closeNewsReader);
   document.addEventListener('keydown', function (e) {
@@ -2503,7 +2524,7 @@
 
   if ('serviceWorker' in navigator) {
     renderAlertSettings();
-  navigator.serviceWorker.register('sw.js?v=42').then(function (reg) {
+  navigator.serviceWorker.register('sw.js?v=43').then(function (reg) {
       try { reg.update(); } catch (e) {}
     }).catch(function () {});
   }
