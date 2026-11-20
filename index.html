@@ -472,7 +472,7 @@
         <div class="card static">
           <div style="font-weight:600;margin-bottom:8px">富途官方行情</div>
           <div style="font-size:12px;color:var(--text-tertiary);line-height:1.45;margin-bottom:10px">
-            港股即時報價改用富途 OpenAPI REST。使用富途 OAuth 2.1 + PKCE 登入授權。Access Token／Refresh Token 只保存在此裝置，不會寫入 Supabase。
+            港股即時報價改用富途 OpenAPI REST。使用已註冊的富途 Public OAuth Client，以 OAuth 2.1 + PKCE 授權。只要求 quote:read；Access Token／Refresh Token 只保存在此裝置，不會寫入 Supabase。
           </div>
           <div id="futu-panel"></div>
         </div>
