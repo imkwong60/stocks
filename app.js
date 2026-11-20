@@ -1077,7 +1077,7 @@
     var srcNote = root.querySelector('[data-field="src-note"]');
     if (srcNote) {
       srcNote.textContent = q.source === 'live'
-        ? ('即時報價 · ' + (q.liveSource === 'futu' || q.market === 'hk' ? '富途官方 REST' : 'Twelve Data') + '（約 2 分鐘內不會被列表覆蓋）')
+        ? ('即時報價 · ' + '富途官方 REST' + '（約 2 分鐘內不會被列表覆蓋）')
         : '列表：騰訊財經 · 可按「更新即時報價」';
     }
     var toggle = document.getElementById('modal-toggle');
@@ -1702,7 +1702,7 @@
   var FUTU_CLIENT_ID = '3255246d-831b-4add-93b6-39aefd8ec3f1';
   var FUTU_REDIRECT_URI = 'https://imkwong60.github.io/stocks/';
   // ★ 部署後請把 YOUR-PROJECT 改成你的 Vercel 網域（只需改這一行），並同步在 index.html 的 CSP connect-src 加入同一網域。
-  var VERCEL_BASE = 'https://https://stocks-tau-roan.vercel.app';
+  var VERCEL_BASE = 'https://YOUR-PROJECT.vercel.app';
   // 富途 token／報價接口不支援瀏覽器 CORS，改經自己的 Vercel 代轉（api/futu-proxy.js）。
   var FUTU_PROXY = VERCEL_BASE + '/api/futu-proxy';
   function futuProxyUrl(kind) {
@@ -1921,19 +1921,30 @@
     return record.access_token;
   }
 
-  function normalizeFutuHKSymbol(symbol) {
-    var s = String(symbol || '').toUpperCase();
-    if (s === 'HSI') return 'HK.800000';
-    var d = s.replace(/\D/g, '');
-    return d ? 'HK.' + d.padStart(5, '0') : '';
+  // 回傳該標的在富途的候選代碼（指數代碼有不確定時多給幾個，富途會略過無效代碼）
+  function futuCodeCandidates(item) {
+    var s = String(item.symbol || '').toUpperCase().replace(/^\./, '');
+    if (item.market === 'hk') {
+      if (s === 'HSI') return ['HK.800000'];
+      var d = s.replace(/\D/g, '');
+      return d ? ['HK.' + d.padStart(5, '0')] : [];
+    }
+    if (s === 'DJI') return ['US..DJI'];
+    if (s === 'IXIC') return ['US..IXIC'];
+    if (s === 'INX' || s === 'SPX') return ['US..SPX', 'US..INX'];
+    return s ? ['US.' + s] : [];
   }
 
-  async function fetchFutuHKQuotes(items) {
+  async function fetchFutuQuotes(items) {
     var token = await getValidFutuAccessToken();
-    var codes = items.map(function (item) {
-      return normalizeFutuHKSymbol(item.symbol);
-    }).filter(Boolean);
-    if (!codes.length) throw new Error('沒有有效的港股代碼');
+    var codeToItem = {};
+    var codes = [];
+    items.forEach(function (item) {
+      futuCodeCandidates(item).forEach(function (c) {
+        if (!codeToItem[c]) { codeToItem[c] = item; codes.push(c); }
+      });
+    });
+    if (!codes.length) throw new Error('沒有有效的股票代碼');
 
     async function request(accessToken) {
       var res = await fetch(futuProxyUrl('quote'), {
@@ -1959,25 +1970,27 @@
     var result = {};
     list.forEach(function (raw) {
       var code = String(raw.code || '').toUpperCase();
-      var symbol = code.indexOf('HK.') === 0 ? code.slice(3) : '';
-      if (!symbol) return;
-      var item = items.find(function (x) { return normalizeFutuHKSymbol(x.symbol) === code; });
+      var item = codeToItem[code];
       if (!item) return;
-      symbol = item.symbol;
+      var market = item.market, symbol = item.symbol;
       var prev = num(raw.prev_close_price), price = num(raw.last_price);
+      if (price == null || price === 0) return;
       var change = price != null && prev != null ? price - prev : null;
       var pct = change != null && prev ? change / prev * 100 : null;
       var dataTime = num(raw.data_time);
-      var timeText = dataTime != null ? new Date(dataTime).toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong', hour12: false }) : '';
-      result[makeKey('hk', symbol)] = {
-        key: makeKey('hk', symbol), market: 'hk', symbol: symbol,
-        name: lookupName('hk', symbol, raw.tc_name || raw.name || raw.sc_name || symbol),
+      var tz = market === 'hk' ? 'Asia/Hong_Kong' : 'America/New_York';
+      var timeText = dataTime ? new Date(dataTime).toLocaleString('zh-HK', { timeZone: tz, hour12: false }) + (market === 'us' ? '（美東）' : '') : '';
+      var key = makeKey(market, symbol);
+      result[key] = {
+        key: key, market: market, symbol: symbol,
+        name: lookupName(market, symbol, raw.tc_name || raw.name || raw.sc_name || symbol),
         price: price, prevClose: prev, open: num(raw.open_price), high: num(raw.high_price), low: num(raw.low_price),
-        volume: num(raw.volume) || 0, change: change, changePct: pct, currency: 'HKD', time: timeText || raw.data_date || '',
+        volume: num(raw.volume) || 0, change: change, changePct: pct, currency: market === 'hk' ? 'HKD' : 'USD',
+        time: timeText || raw.data_date || '',
         source: 'live', liveSource: 'futu', fetchedAt: Date.now()
       };
     });
-    if (!Object.keys(result).length) throw new Error('富途沒有返回有效港股行情（請檢查代碼及行情權限）');
+    if (!Object.keys(result).length) throw new Error('富途沒有返回有效行情（請檢查代碼及該市場的行情權限）');
     return result;
   }
 
@@ -1989,43 +2002,7 @@
       btn.classList.add('busy');
     }
     try {
-      var result;
-      if (market === 'hk') {
-        result = await fetchFutuHKQuotes([{ market: market, symbol: symbol }]);
-      } else {
-        // 保留現有美股／美指即時行情流程
-        var res = await fetch(marketApiUrl(), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          cache: 'no-store',
-          body: JSON.stringify({ action: 'live_quote', item: { market: market, symbol: symbol } })
-        });
-        var payload = await res.json();
-        if (!res.ok) throw new Error(payload.error || '即時查詢失敗');
-        var raw = payload.quote;
-        if (!raw || raw.close == null) throw new Error('無報價資料');
-        var prevQ = quotes[key] || {};
-        result = {};
-        result[key] = {
-          key: key,
-          market: market,
-          symbol: symbol,
-          name: lookupName(market, symbol, raw.name || prevQ.name || symbol),
-          price: num(raw.close),
-          prevClose: num(raw.previous_close),
-          open: num(raw.open),
-          high: num(raw.high),
-          low: num(raw.low),
-          volume: num(raw.volume) || 0,
-          change: num(raw.change),
-          changePct: num(raw.percent_change),
-          currency: raw.currency || 'USD',
-          time: raw.datetime || new Date().toISOString(),
-          source: 'live',
-          liveSource: raw.source || 'twelve',
-          fetchedAt: Date.now()
-        };
-      }
+      var result = await fetchFutuQuotes([{ market: market, symbol: symbol }]);
 
       if (!result[key]) throw new Error('無報價資料');
 
@@ -2041,7 +2018,7 @@
       if (selectedKey === key) updateModalPrices();
       markUpdatedAt();
 
-      var srcLabel = market === 'hk' ? '富途官方 REST' : 'Twelve Data';
+      var srcLabel = '富途官方 REST';
       showToast('已更新即時報價（' + srcLabel + '）', 1800, 'success');
       return quotes[key];
     } catch (err) {
@@ -2128,7 +2105,7 @@
     document.getElementById('btn-futu-test').onclick = async function () {
       var btn = this; btn.disabled = true; btn.classList.add('busy'); status.textContent = '正在測試富途港股行情…';
       try {
-        var test = await fetchFutuHKQuotes([{ market: 'hk', symbol: '00700' }]);
+        var test = await fetchFutuQuotes([{ market: 'hk', symbol: '00700' }]);
         var q = test[makeKey('hk', '00700')];
         status.textContent = q ? ('連線成功 · 騰訊控股 ' + formatPrice(q.price, 'hk', '00700') + ' · ' + (q.time || '')) : '連線成功，但未返回測試股票';
         showToast('富途官方 REST 行情測試成功', 1800, 'success');
@@ -2168,7 +2145,7 @@
       '<div class="stock-change ' + ch.cls + '" data-field="change" style="margin-top:6px;display:inline-flex">' + ch.text + '</div>' +
       '<div style="margin-top:4px;font-size:11px;color:var(--text-tertiary)" data-field="src-note">' +
         (q.source === 'live'
-          ? ('即時報價 · ' + (q.liveSource === 'futu' || q.market === 'hk' ? '富途官方 REST' : 'Twelve Data') + '（約 2 分鐘內不會被列表覆蓋）')
+          ? ('即時報價 · ' + '富途官方 REST' + '（約 2 分鐘內不會被列表覆蓋）')
           : (q.market === 'hk' ? '列表：騰訊財經 · 可按「更新即時報價」' : '列表：騰訊財經 · 可按「更新即時報價」')) +
       '</div>' +
       '<div class="detail-grid">' +
