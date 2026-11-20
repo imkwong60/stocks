@@ -1702,7 +1702,7 @@
   var FUTU_CLIENT_ID = '3255246d-831b-4add-93b6-39aefd8ec3f1';
   var FUTU_REDIRECT_URI = 'https://imkwong60.github.io/stocks/';
   // ★ 部署後請把 YOUR-PROJECT 改成你的 Vercel 網域（只需改這一行），並同步在 index.html 的 CSP connect-src 加入同一網域。
-  var VERCEL_BASE = 'https://stocks-tau-roan.vercel.app';
+  var VERCEL_BASE = 'https://stocks-tau-roan.vercel.app/';
   // 富途 token／報價接口不支援瀏覽器 CORS，改經自己的 Vercel 代轉（api/futu-proxy.js）。
   var FUTU_PROXY = VERCEL_BASE + '/api/futu-proxy';
   function futuProxyUrl(kind) {
@@ -2032,6 +2032,101 @@
     }
   }
 
+  var liveAllInFlight = false;
+  var FUTU_LIVE_BATCH = 25; // 代轉 code_list 上限 50；預留候選碼擴展空間
+
+  /** 自選全部走富途即時快照（按需，非推送） */
+  async function refreshAllLiveQuotes() {
+    if (liveAllInFlight) {
+      showToast('即時更新進行中…', 1800, 'warn');
+      return;
+    }
+    var items = watchlist.slice();
+    if (currentPage === 'markets') {
+      MARKET_INDICES.forEach(function (p) {
+        var key = makeKey(p.market, p.symbol);
+        if (!items.some(function (w) { return w.key === key; })) {
+          items.push({ key: key, market: p.market, symbol: p.symbol });
+        }
+      });
+    }
+    if (!items.length) {
+      showToast('自選清單是空的', 2200, 'warn');
+      return;
+    }
+    if (!getFutuAccessToken()) {
+      showToast('尚未連接富途；請到「設定」→「富途官方行情」連接', 3200, 'error');
+      return;
+    }
+    liveAllInFlight = true;
+    var btn = document.getElementById('btn-live-all');
+    if (btn) {
+      btn.disabled = true;
+      btn.classList.add('busy');
+    }
+    var dot = document.getElementById('refresh-dot');
+    if (dot) {
+      dot.classList.add('pulse');
+      setTimeout(function () { dot.classList.remove('pulse'); }, 800);
+    }
+    showToast('正在以富途更新全部自選（' + items.length + '）…', 2200, 'warn');
+    var merged = {};
+    var errors = [];
+    try {
+      for (var i = 0; i < items.length; i += FUTU_LIVE_BATCH) {
+        var batch = items.slice(i, i + FUTU_LIVE_BATCH);
+        try {
+          var part = await fetchFutuQuotes(batch);
+          Object.keys(part).forEach(function (k) { merged[k] = part[k]; });
+        } catch (batchErr) {
+          errors.push(batchErr && batchErr.message ? batchErr.message : '批次失敗');
+        }
+      }
+      var count = 0;
+      Object.keys(merged).forEach(function (k) {
+        var q = merged[k];
+        if (!q) return;
+        if (q.change == null && q.price != null && q.prevClose != null) {
+          q.change = q.price - q.prevClose;
+        }
+        if (q.changePct == null && q.change != null && q.prevClose) {
+          q.changePct = q.change / q.prevClose * 100;
+        }
+        quotes[k] = q;
+        count += 1;
+      });
+      if (count) {
+        checkPriceAlerts(merged);
+        markUpdatedAt();
+        if (currentPage === 'watchlist') renderWatchlist(false);
+        if (currentPage === 'markets') renderMarkets(false);
+        if (selectedKey && quotes[selectedKey]) updateModalPrices();
+      }
+      if (count && !errors.length) {
+        showToast('已用富途即時更新 ' + count + ' 檔（約 2 分鐘內不被騰訊覆蓋）', 2800, 'success');
+      } else if (count && errors.length) {
+        showToast('已更新 ' + count + ' 檔；部分失敗：' + errors[0], 3600, 'warn');
+      } else {
+        showToast(errors[0] || '富途沒有返回有效行情', 3200, 'error');
+      }
+    } catch (err) {
+      quoteErrorToast(err, '全部即時更新失敗');
+    } finally {
+      liveAllInFlight = false;
+      if (btn) {
+        btn.disabled = false;
+        btn.classList.remove('busy');
+      }
+    }
+  }
+
+  function updateLiveAllButtonVisibility() {
+    var btn = document.getElementById('btn-live-all');
+    if (!btn) return;
+    var show = currentPage === 'watchlist' || currentPage === 'markets';
+    btn.style.display = show ? '' : 'none';
+  }
+
   async function handleFutuOAuthCallback() {
     var url = new URL(window.location.href);
     var code = url.searchParams.get('code');
@@ -2260,6 +2355,7 @@
       refreshBtn.setAttribute('aria-label', page === 'news' ? '更新新聞' : '重新整理');
       refreshBtn.title = page === 'news' ? '更新新聞' : '重新整理';
     }
+    updateLiveAllButtonVisibility();
   }
 
   function collectNeeded() {
@@ -2761,6 +2857,12 @@
     startPolling();
     showToast('正在更新行情', 1800, 'warn');
   });
+  var liveAllBtn = document.getElementById('btn-live-all');
+  if (liveAllBtn) {
+    liveAllBtn.addEventListener('click', function () {
+      refreshAllLiveQuotes();
+    });
+  }
   document.getElementById('btn-search').addEventListener('click', async function () {
     var raw = document.getElementById('search-input').value.trim();
     if (!raw) { showToast('請輸入關鍵字'); return; }
@@ -2928,6 +3030,7 @@
   renderPresets();
   renderWatchlist(true);
   updateSearchVisibility();
+  updateLiveAllButtonVisibility();
   renderAuthPanel();
 
   // 若本機已綁定 Email，啟動時靜默嘗試載入雲端（不寄信）
