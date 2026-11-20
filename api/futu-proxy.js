@@ -59,7 +59,7 @@ module.exports = async function handler(req, res) {
     let b = req.body;
     if (typeof b === 'string') { try { b = JSON.parse(b); } catch (e) { b = {}; } }
     const codes = Array.isArray(b && b.code_list)
-      ? b.code_list.filter(function (c) { return /^HK\.[0-9A-Z]{1,8}$/.test(String(c)); }).slice(0, 50)
+      ? b.code_list.filter(function (c) { return /^(HK|US)\.[.0-9A-Z]{1,10}$/.test(String(c)); }).slice(0, 50)
       : [];
     if (!codes.length) return send(res, 400, { error: 'bad_code_list' });
     headers = { 'Content-Type': 'application/json', 'Authorization': auth };
