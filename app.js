@@ -1701,6 +1701,15 @@
   // 已完成富途官方 Public OAuth Client 註冊；PWA 不再於瀏覽器呼叫 /oauth2/register。
   var FUTU_CLIENT_ID = '3255246d-831b-4add-93b6-39aefd8ec3f1';
   var FUTU_REDIRECT_URI = 'https://imkwong60.github.io/stocks/';
+  // 富途 token／報價接口不支援瀏覽器 CORS，改經自己的 Vercel 代轉（api/futu-proxy.js）。
+  // ★ 部署後請把 YOUR-PROJECT 改成你的 Vercel 網域，並同步在 index.html 的 CSP connect-src 加入同一網域。
+  var FUTU_PROXY = 'https://stocks-tau-roan.vercel.app/api/futu-proxy';
+  function futuProxyUrl(kind) {
+    if (/YOUR-PROJECT/.test(FUTU_PROXY)) {
+      throw new Error('尚未設定富途代轉網址：請在 app js 把 FUTU_PROXY 改成你的 Vercel 網域');
+    }
+    return FUTU_PROXY + '?p=' + kind;
+  }
   var FUTU_OAUTH_SCOPE = 'quote:read';
   var FUTU_TOKEN_KEY = 'futu_oauth_token_v3';
   var FUTU_OAUTH_STATE_KEY = 'futu_oauth_state_v4';
@@ -1811,16 +1820,17 @@
 
   async function futuTokenRequest(body) {
     try {
-      return await fetch(FUTU_API_BASE + '/oauth2/token', {
+      return await fetch(futuProxyUrl('token'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: body.toString()
       });
     } catch (netErr) {
+      if (/尚未設定富途代轉網址/.test(String(netErr && netErr.message))) throw netErr;
       // 區分：連得到富途但被 CORS 擋住，還是根本連唔到
       var reachable = false;
       try {
-        await fetch(FUTU_API_BASE + '/oauth2/token', {
+        await fetch(futuProxyUrl('token'), {
           method: 'POST', mode: 'no-cors',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: 'grant_type=probe'
@@ -1829,8 +1839,8 @@
       } catch (e2) {}
       console.warn('[futu oauth] token request failed', netErr, { reachable: reachable });
       throw new Error(reachable
-        ? '富途 token 接口已連線，但瀏覽器擋住回應（CORS）；授權碼可能已被使用，需要改用後端代轉'
-        : '連唔到富途 token 接口（網絡不穩或被封鎖）；請重新按「連接富途」');
+        ? '代轉伺服器已連線，但回應被瀏覽器擋住；請檢查 api/futu-proxy.js 的 ALLOWED_ORIGIN，授權碼可能已用過，需重新連接'
+        : '連唔到富途代轉伺服器：請檢查 FUTU_PROXY 網址、Vercel 是否已部署，以及 index.html CSP 的 connect-src 有冇加入該網域');
     }
   }
 
@@ -1918,7 +1928,7 @@
     if (!codes.length) throw new Error('沒有有效的港股代碼');
 
     async function request(accessToken) {
-      var res = await fetch(FUTU_API_BASE + '/api/v1.0/quote/stock-quote', {
+      var res = await fetch(futuProxyUrl('quote'), {
         method: 'POST', cache: 'no-store',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
         body: JSON.stringify({ code_list: codes })
