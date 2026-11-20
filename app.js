@@ -1703,9 +1703,9 @@
   var FUTU_REDIRECT_URI = 'https://imkwong60.github.io/stocks/';
   var FUTU_OAUTH_SCOPE = 'quote:read';
   var FUTU_TOKEN_KEY = 'futu_oauth_token_v3';
-  var FUTU_OAUTH_STATE_KEY = 'futu_oauth_state_v3';
-  var FUTU_OAUTH_VERIFIER_KEY = 'futu_oauth_verifier_v3';
-  var FUTU_OAUTH_REDIRECT_KEY = 'futu_oauth_redirect_v3';
+  var FUTU_OAUTH_STATE_KEY = 'futu_oauth_state_v4';
+  var FUTU_OAUTH_VERIFIER_KEY = 'futu_oauth_verifier_v4';
+  var FUTU_OAUTH_REDIRECT_KEY = 'futu_oauth_redirect_v4';
 
   function getFutuTokenRecord() {
     try { return JSON.parse(lsGet(FUTU_TOKEN_KEY, '{}') || '{}'); } catch (e) { return {}; }
@@ -1773,6 +1773,16 @@
       throw new Error('此瀏覽器不支援 OAuth PKCE，請更新瀏覽器');
     }
     var clientId = getFutuClientId();
+    // Remove transactions from older builds so a stale callback can never
+    // be mistaken for the current authorization attempt.
+    try {
+      localStorage.removeItem('futu_oauth_state_v3');
+      localStorage.removeItem('futu_oauth_verifier_v3');
+      localStorage.removeItem('futu_oauth_redirect_v3');
+      sessionStorage.removeItem('futu_oauth_state_v3');
+      sessionStorage.removeItem('futu_oauth_verifier_v3');
+      sessionStorage.removeItem('futu_oauth_redirect_v3');
+    } catch (e0) {}
     var pkce = await makePkcePair();
     var state = randomBase64Url(32);
     var redirectUri = futuRedirectUri();
@@ -1799,8 +1809,9 @@
     var savedState = localStorage.getItem(FUTU_OAUTH_STATE_KEY) || sessionStorage.getItem(FUTU_OAUTH_STATE_KEY) || '';
     var verifier = localStorage.getItem(FUTU_OAUTH_VERIFIER_KEY) || sessionStorage.getItem(FUTU_OAUTH_VERIFIER_KEY) || '';
     var redirectUri = localStorage.getItem(FUTU_OAUTH_REDIRECT_KEY) || sessionStorage.getItem(FUTU_OAUTH_REDIRECT_KEY) || futuRedirectUri();
-    if (!savedState) throw new Error('找不到富途 OAuth 授權狀態，請重新按「連接富途」');
-    if (state !== savedState) throw new Error('富途 OAuth 狀態驗證失敗，請重新連接');
+    if (!savedState) throw new Error('找不到今次富途授權狀態；請重新按「連接富途」再做一次');
+    if (!state) throw new Error('富途沒有把授權狀態帶回來；請重新按「連接富途」再做一次');
+    if (state !== savedState) throw new Error('富途授權狀態與本次登入不一致；請重新按「連接富途」再做一次');
     if (!verifier) throw new Error('找不到 OAuth PKCE verifier，請重新連接');
 
     var body = new URLSearchParams({
