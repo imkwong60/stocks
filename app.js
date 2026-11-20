@@ -1181,7 +1181,7 @@
       return corporateEvents[key];
     }
     try {
-      var res = await fetch('/api/market', {
+      var res = await fetch(marketApiUrl(), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         cache: 'no-store',
@@ -1701,14 +1701,22 @@
   // 已完成富途官方 Public OAuth Client 註冊；PWA 不再於瀏覽器呼叫 /oauth2/register。
   var FUTU_CLIENT_ID = '3255246d-831b-4add-93b6-39aefd8ec3f1';
   var FUTU_REDIRECT_URI = 'https://imkwong60.github.io/stocks/';
+  // ★ 部署後請把 YOUR-PROJECT 改成你的 Vercel 網域（只需改這一行），並同步在 index.html 的 CSP connect-src 加入同一網域。
+  var VERCEL_BASE = 'https://https://stocks-tau-roan.vercel.app';
   // 富途 token／報價接口不支援瀏覽器 CORS，改經自己的 Vercel 代轉（api/futu-proxy.js）。
-  // ★ 部署後請把 YOUR-PROJECT 改成你的 Vercel 網域，並同步在 index.html 的 CSP connect-src 加入同一網域。
-  var FUTU_PROXY = 'https://stocks-tau-roan.vercel.app/api/futu-proxy';
+  var FUTU_PROXY = VERCEL_BASE + '/api/futu-proxy';
   function futuProxyUrl(kind) {
-    if (/YOUR-PROJECT/.test(FUTU_PROXY)) {
-      throw new Error('尚未設定富途代轉網址：請在 app js 把 FUTU_PROXY 改成你的 Vercel 網域');
+    if (/YOUR-PROJECT/.test(VERCEL_BASE)) {
+      throw new Error('尚未設定富途代轉網址：請在 app js 把 VERCEL_BASE 改成你的 Vercel 網域');
     }
     return FUTU_PROXY + '?p=' + kind;
+  }
+  // 美股即時報價、企業日程走 Vercel 的 api/market（GitHub Pages 沒有這個路徑）
+  function marketApiUrl() {
+    if (/YOUR-PROJECT/.test(VERCEL_BASE)) {
+      throw new Error('尚未設定 Vercel 網域：請在 app js 把 VERCEL_BASE 改成你的 Vercel 網域');
+    }
+    return VERCEL_BASE + '/api/market';
   }
   var FUTU_OAUTH_SCOPE = 'quote:read';
   var FUTU_TOKEN_KEY = 'futu_oauth_token_v3';
@@ -1826,7 +1834,7 @@
         body: body.toString()
       });
     } catch (netErr) {
-      if (/尚未設定富途代轉網址/.test(String(netErr && netErr.message))) throw netErr;
+      if (/尚未設定/.test(String(netErr && netErr.message))) throw netErr;
       // 區分：連得到富途但被 CORS 擋住，還是根本連唔到
       var reachable = false;
       try {
@@ -1840,7 +1848,7 @@
       console.warn('[futu oauth] token request failed', netErr, { reachable: reachable });
       throw new Error(reachable
         ? '代轉伺服器已連線，但回應被瀏覽器擋住；請檢查 api/futu-proxy.js 的 ALLOWED_ORIGIN，授權碼可能已用過，需重新連接'
-        : '連唔到富途代轉伺服器：請檢查 FUTU_PROXY 網址、Vercel 是否已部署，以及 index.html CSP 的 connect-src 有冇加入該網域');
+        : '連唔到富途代轉伺服器：請檢查 VERCEL_BASE 網址、Vercel 是否已部署，以及 index.html CSP 的 connect-src 有冇加入該網域');
     }
   }
 
@@ -1986,7 +1994,7 @@
         result = await fetchFutuHKQuotes([{ market: market, symbol: symbol }]);
       } else {
         // 保留現有美股／美指即時行情流程
-        var res = await fetch('/api/market', {
+        var res = await fetch(marketApiUrl(), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           cache: 'no-store',
