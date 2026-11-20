@@ -1698,11 +1698,14 @@
   // OAuth 2.1 + PKCE：設定頁「連接富途」後自動取得／刷新 Access Token。
   // Token 只保存在本機，不寫入 Supabase；前端不保存 client secret。
   var FUTU_API_BASE = 'https://webapi.futunn.com';
-  var FUTU_TOKEN_KEY = 'futu_oauth_token_v2';
-  var FUTU_CLIENT_KEY = 'futu_oauth_client_id_v2';
-  var FUTU_OAUTH_STATE_KEY = 'futu_oauth_state_v2';
-  var FUTU_OAUTH_VERIFIER_KEY = 'futu_oauth_verifier_v2';
-  var FUTU_OAUTH_REDIRECT_KEY = 'futu_oauth_redirect_v2';
+  // 已完成富途官方 Public OAuth Client 註冊；PWA 不再於瀏覽器呼叫 /oauth2/register。
+  var FUTU_CLIENT_ID = '3255246d-831b-4add-93b6-39aefd8ec3f1';
+  var FUTU_REDIRECT_URI = 'https://imkwong60.github.io/stocks/';
+  var FUTU_OAUTH_SCOPE = 'quote:read';
+  var FUTU_TOKEN_KEY = 'futu_oauth_token_v3';
+  var FUTU_OAUTH_STATE_KEY = 'futu_oauth_state_v3';
+  var FUTU_OAUTH_VERIFIER_KEY = 'futu_oauth_verifier_v3';
+  var FUTU_OAUTH_REDIRECT_KEY = 'futu_oauth_redirect_v3';
 
   function getFutuTokenRecord() {
     try { return JSON.parse(lsGet(FUTU_TOKEN_KEY, '{}') || '{}'); } catch (e) { return {}; }
@@ -1718,19 +1721,11 @@
   }
 
   function getFutuClientId() {
-    return String(lsGet(FUTU_CLIENT_KEY, '') || '').trim();
-  }
-
-  function setFutuClientId(id) {
-    id = String(id || '').trim();
-    if (id) lsSet(FUTU_CLIENT_KEY, id); else lsDel(FUTU_CLIENT_KEY);
+    return FUTU_CLIENT_ID;
   }
 
   function futuRedirectUri() {
-    var url = new URL(window.location.href);
-    url.search = '';
-    url.hash = '';
-    return url.href;
+    return FUTU_REDIRECT_URI;
   }
 
   function randomBase64Url(bytes) {
@@ -1768,36 +1763,11 @@
     return '富途即時行情查詢失敗（HTTP ' + status + '）';
   }
 
-  async function registerFutuOAuthClient() {
-    var existing = getFutuClientId();
-    if (existing) return existing;
-
-    var redirectUri = futuRedirectUri();
-    var res = await fetch(FUTU_API_BASE + '/oauth2/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        redirect_uris: [redirectUri],
-        token_endpoint_auth_method: 'none',
-        grant_types: ['authorization_code', 'refresh_token'],
-        response_types: ['code'],
-        client_name: '股票本本'
-      })
-    });
-    var payload = null;
-    try { payload = await res.json(); } catch (e) {}
-    if (!res.ok || !payload || !payload.client_id) {
-      throw new Error((payload && (payload.error_description || payload.error || payload.message)) || '無法註冊富途 OAuth Client');
-    }
-    setFutuClientId(payload.client_id);
-    return payload.client_id;
-  }
-
   async function startFutuOAuth() {
     if (!window.crypto || !crypto.subtle || !window.TextEncoder) {
       throw new Error('此瀏覽器不支援 OAuth PKCE，請更新瀏覽器');
     }
-    var clientId = await registerFutuOAuthClient();
+    var clientId = getFutuClientId();
     var pkce = await makePkcePair();
     var state = randomBase64Url(32);
     var redirectUri = futuRedirectUri();
@@ -1811,6 +1781,7 @@
       code_challenge_method: 'S256',
       redirect_uri: redirectUri,
       response_type: 'code',
+      scope: FUTU_OAUTH_SCOPE,
       state: state
     });
     window.location.assign(FUTU_API_BASE + '/oauth2/authorize/confirm?' + params.toString());
@@ -2048,7 +2019,7 @@
       '<div class="auth-form">' +
         '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px">' +
           '<div style="font-size:14px;font-weight:600">' + (connected ? '● 已連接富途' : '○ 尚未連接富途') + '</div>' +
-          '<div style="font-size:12px;color:var(--text-tertiary)">' + (connected ? 'OAuth 2.1 + PKCE' : '首次連接會開啟富途登入') + '</div>' +
+          '<div style="font-size:12px;color:var(--text-tertiary)">' + (connected ? 'OAuth 2.1 + PKCE' : '首次連接會開啟富途授權') + '</div>' +
         '</div>' +
         '<div class="auth-row">' +
           '<button class="pill primary" id="btn-futu-connect">' + (connected ? '重新授權' : '連接富途') + '</button>' +
@@ -2056,7 +2027,7 @@
           '<button class="pill" id="btn-futu-test">測試行情</button>' +
         '</div>' +
         '<div id="futu-status" style="font-size:12px;color:var(--text-tertiary);line-height:1.5;margin-top:8px">' +
-          (connected ? ('已授權行情讀取。' + (scope ? ' 權限：' + escapeHtml(scope) : '') + ' Token 會在到期前自動刷新。') : '只需要授權行情讀取（quote:read），不會要求輸入富途密碼。') +
+          (connected ? ('已授權行情讀取。' + (scope ? ' 權限：' + escapeHtml(scope) : '') + ' Token 會在到期前自動刷新。') : '已使用預先註冊的 Public Client；只要求 quote:read 行情權限。') +
         '</div>' +
       '</div>';
 
