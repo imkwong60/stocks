@@ -1809,6 +1809,31 @@
     window.location.assign(FUTU_API_BASE + '/oauth2/authorize/confirm?' + params.toString());
   }
 
+  async function futuTokenRequest(body) {
+    try {
+      return await fetch(FUTU_API_BASE + '/oauth2/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: body.toString()
+      });
+    } catch (netErr) {
+      // 區分：連得到富途但被 CORS 擋住，還是根本連唔到
+      var reachable = false;
+      try {
+        await fetch(FUTU_API_BASE + '/oauth2/token', {
+          method: 'POST', mode: 'no-cors',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'grant_type=probe'
+        });
+        reachable = true;
+      } catch (e2) {}
+      console.warn('[futu oauth] token request failed', netErr, { reachable: reachable });
+      throw new Error(reachable
+        ? '富途 token 接口已連線，但瀏覽器擋住回應（CORS）；授權碼可能已被使用，需要改用後端代轉'
+        : '連唔到富途 token 接口（網絡不穩或被封鎖）；請重新按「連接富途」');
+    }
+  }
+
   async function exchangeFutuAuthorizationCode(code, state) {
     var savedState = localStorage.getItem(FUTU_OAUTH_STATE_KEY) || sessionStorage.getItem(FUTU_OAUTH_STATE_KEY) || '';
     var verifier = localStorage.getItem(FUTU_OAUTH_VERIFIER_KEY) || sessionStorage.getItem(FUTU_OAUTH_VERIFIER_KEY) || '';
@@ -1828,15 +1853,11 @@
       redirect_uri: redirectUri,
       code_verifier: verifier
     });
-    var res = await fetch(FUTU_API_BASE + '/oauth2/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.toString()
-    });
+    var res = await futuTokenRequest(body);
     var payload = null;
     try { payload = await res.json(); } catch (e) {}
     if (!res.ok || !payload || !payload.access_token) {
-      throw new Error((payload && (payload.error_description || payload.error || payload.message)) || '富途授權失敗');
+      throw new Error((payload && (payload.error_description || payload.error || payload.message)) || ('富途授權失敗（HTTP ' + res.status + '）'));
     }
     setFutuTokenRecord({
       access_token: payload.access_token,
@@ -1857,11 +1878,7 @@
       refresh_token: record.refresh_token,
       client_id: getFutuClientId()
     });
-    var res = await fetch(FUTU_API_BASE + '/oauth2/token', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: body.toString()
-    });
+    var res = await futuTokenRequest(body);
     var payload = null;
     try { payload = await res.json(); } catch (e) {}
     if (!res.ok || !payload || !payload.access_token) {
