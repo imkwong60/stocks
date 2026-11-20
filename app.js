@@ -1773,6 +1773,10 @@
       throw new Error('此瀏覽器不支援 OAuth PKCE，請更新瀏覽器');
     }
     var clientId = getFutuClientId();
+    var redirectOrigin = new URL(futuRedirectUri()).origin;
+    if (window.location.origin !== redirectOrigin) {
+      throw new Error('請用 ' + futuRedirectUri() + ' 開啟本頁再連接富途（目前網域：' + window.location.origin + '，授權完會跳去另一個網域，讀唔到登入狀態）');
+    }
     // Remove transactions from older builds so a stale callback can never
     // be mistaken for the current authorization attempt.
     try {
@@ -1809,7 +1813,10 @@
     var savedState = localStorage.getItem(FUTU_OAUTH_STATE_KEY) || sessionStorage.getItem(FUTU_OAUTH_STATE_KEY) || '';
     var verifier = localStorage.getItem(FUTU_OAUTH_VERIFIER_KEY) || sessionStorage.getItem(FUTU_OAUTH_VERIFIER_KEY) || '';
     var redirectUri = localStorage.getItem(FUTU_OAUTH_REDIRECT_KEY) || sessionStorage.getItem(FUTU_OAUTH_REDIRECT_KEY) || futuRedirectUri();
-    if (!savedState) throw new Error('找不到今次富途授權狀態；請重新按「連接富途」再做一次');
+    if (!savedState) {
+      console.warn('[futu oauth] no saved state', { origin: location.origin, href: location.href.replace(/code=[^&]+/, 'code=…') });
+      throw new Error('找不到今次富途授權狀態（目前網域：' + location.origin + '）；請在同一個分頁按「連接富途」，完成後不要重新整理');
+    }
     if (!state) throw new Error('富途沒有把授權狀態帶回來；請重新按「連接富途」再做一次');
     if (state !== savedState) throw new Error('富途授權狀態與本次登入不一致；請重新按「連接富途」再做一次');
     if (!verifier) throw new Error('找不到 OAuth PKCE verifier，請重新連接');
@@ -1879,6 +1886,13 @@
     return record.access_token;
   }
 
+  function normalizeFutuHKSymbol(symbol) {
+    var s = String(symbol || '').toUpperCase();
+    if (s === 'HSI') return 'HK.800000';
+    var d = s.replace(/\D/g, '');
+    return d ? 'HK.' + d.padStart(5, '0') : '';
+  }
+
   async function fetchFutuHKQuotes(items) {
     var token = await getValidFutuAccessToken();
     var codes = items.map(function (item) {
@@ -1914,6 +1928,7 @@
       if (!symbol) return;
       var item = items.find(function (x) { return normalizeFutuHKSymbol(x.symbol) === code; });
       if (!item) return;
+      symbol = item.symbol;
       var prev = num(raw.prev_close_price), price = num(raw.last_price);
       var change = price != null && prev != null ? price - prev : null;
       var pct = change != null && prev ? change / prev * 100 : null;
@@ -2011,6 +2026,12 @@
     var state = url.searchParams.get('state');
     var error = url.searchParams.get('error');
     if (!code && !error) return false;
+    if (code) {
+      var lastCode = '';
+      try { lastCode = sessionStorage.getItem('futu_oauth_last_code') || ''; } catch (e0) {}
+      if (lastCode === code) { history.replaceState(null, '', futuRedirectUri()); return true; }
+      try { sessionStorage.setItem('futu_oauth_last_code', code); } catch (e1) {}
+    }
     if (error) {
       clearFutuOAuthSession();
       history.replaceState(null, '', futuRedirectUri());
