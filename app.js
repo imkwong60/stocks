@@ -1077,7 +1077,7 @@
     var srcNote = root.querySelector('[data-field="src-note"]');
     if (srcNote) {
       srcNote.textContent = q.source === 'live'
-        ? ('即時報價 · ' + (q.liveSource === 'itick' || q.market === 'hk' ? 'iTick' : 'Twelve Data') + '（約 2 分鐘內不會被列表覆蓋）')
+        ? ('即時報價 · ' + (q.liveSource === 'futu' || q.market === 'hk' ? '富途官方 REST' : 'Twelve Data') + '（約 2 分鐘內不會被列表覆蓋）')
         : '列表：騰訊財經 · 可按「更新即時報價」';
     }
     var toggle = document.getElementById('modal-toggle');
@@ -1694,6 +1694,124 @@
     }
   }
 
+  // 富途官方 OpenAPI REST（HK 即時報價）
+  // OAuth access token 只保存在本機 localStorage；不放入程式碼／Supabase。
+  var FUTU_API_BASE = 'https://webapi.futunn.com';
+  var FUTU_TOKEN_KEY = 'futu_openapi_access_token_v1';
+  var FUTU_TOKEN_DRAFT_KEY = 'futu_openapi_access_token_draft_v1';
+
+  function getFutuAccessToken() {
+    return String(lsGet(FUTU_TOKEN_KEY, '') || '').trim();
+  }
+
+  function setFutuAccessToken(token) {
+    token = String(token || '').trim();
+    if (token) lsSet(FUTU_TOKEN_KEY, token);
+    else lsDel(FUTU_TOKEN_KEY);
+  }
+
+  function normalizeFutuHKSymbol(symbol) {
+    var sym = String(symbol || '').toUpperCase().trim();
+    if (!sym) return '';
+    if (sym === 'HSI') return 'HK.HSI';
+    var digits = sym.replace(/\D/g, '');
+    if (!digits) return '';
+    return 'HK.' + digits.padStart(5, '0');
+  }
+
+  function futuQuoteError(payload, status) {
+    var msg = payload && (payload.ret_msg || payload.message || payload.error);
+    if (msg) return String(msg);
+    if (status === 401) return '富途登入已失效，請在設定重新輸入 Access Token';
+    if (status === 403) return '富途帳戶沒有可用的港股行情權限';
+    if (status === 429) return '富途 API 請求過於頻繁，請稍後再試';
+    return '富途即時行情查詢失敗（HTTP ' + status + '）';
+  }
+
+  async function fetchFutuHKQuotes(items) {
+    var token = getFutuAccessToken();
+    if (!token) {
+      throw new Error('尚未設定富途 Access Token；請到「設定」→「富途官方行情」輸入');
+    }
+
+    var codes = items.map(function (item) {
+      return normalizeFutuHKSymbol(item.symbol);
+    }).filter(Boolean);
+
+    if (!codes.length) throw new Error('沒有有效的港股代碼');
+
+    var res = await fetch(FUTU_API_BASE + '/api/v1.0/quote/stock-quote', {
+      method: 'POST',
+      cache: 'no-store',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + token
+      },
+      body: JSON.stringify({ code_list: codes })
+    });
+
+    var payload = null;
+    try { payload = await res.json(); } catch (e) {}
+
+    if (!res.ok) throw new Error(futuQuoteError(payload, res.status));
+    if (!payload || payload.ret_code !== 0) {
+      throw new Error(futuQuoteError(payload, res.status || 200));
+    }
+
+    var list = payload.data && Array.isArray(payload.data.quote_list)
+      ? payload.data.quote_list : [];
+    var result = {};
+
+    list.forEach(function (raw) {
+      var code = String(raw.code || '').toUpperCase();
+      var symbol = code.indexOf('HK.') === 0 ? code.slice(3) : '';
+      if (!symbol) return;
+
+      var item = items.find(function (x) {
+        return normalizeFutuHKSymbol(x.symbol) === code;
+      });
+      if (!item) return;
+
+      var prev = num(raw.prev_close_price);
+      var price = num(raw.last_price);
+      var change = price != null && prev != null ? price - prev : null;
+      var pct = change != null && prev ? change / prev * 100 : null;
+      var tcName = raw.tc_name || raw.name || raw.sc_name || symbol;
+      var dataTime = num(raw.data_time);
+      var timeText = dataTime != null
+        ? new Date(dataTime).toLocaleString('zh-HK', {
+            timeZone: 'Asia/Hong_Kong',
+            hour12: false
+          })
+        : '';
+
+      result[makeKey('hk', symbol)] = {
+        key: makeKey('hk', symbol),
+        market: 'hk',
+        symbol: symbol,
+        name: lookupName('hk', symbol, tcName),
+        price: price,
+        prevClose: prev,
+        open: num(raw.open_price),
+        high: num(raw.high_price),
+        low: num(raw.low_price),
+        volume: num(raw.volume) || 0,
+        change: change,
+        changePct: pct,
+        currency: 'HKD',
+        time: timeText || raw.data_date || '',
+        source: 'live',
+        liveSource: 'futu',
+        fetchedAt: Date.now()
+      };
+    });
+
+    if (!Object.keys(result).length) {
+      throw new Error('富途沒有返回有效港股行情（請檢查代碼及行情權限）');
+    }
+    return result;
+  }
+
   async function applyLiveQuote(market, symbol, btn) {
     var key = makeKey(market, symbol);
     if (btn) {
@@ -1702,36 +1820,47 @@
       btn.classList.add('busy');
     }
     try {
-      var res = await fetch('/api/market', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        cache: 'no-store',
-        body: JSON.stringify({ action: 'live_quote', item: { market: market, symbol: symbol } })
-      });
-      var payload = await res.json();
-      if (!res.ok) throw new Error(payload.error || '即時查詢失敗');
-      var raw = payload.quote;
-      if (!raw || raw.close == null) throw new Error('無報價資料');
-      var prevQ = quotes[key] || {};
-      quotes[key] = {
-        key: key,
-        market: market,
-        symbol: symbol,
-        name: lookupName(market, symbol, raw.name || prevQ.name || symbol),
-        price: num(raw.close),
-        prevClose: num(raw.previous_close),
-        open: num(raw.open),
-        high: num(raw.high),
-        low: num(raw.low),
-        volume: num(raw.volume) || 0,
-        change: num(raw.change),
-        changePct: num(raw.percent_change),
-        currency: raw.currency || (market === 'hk' ? 'HKD' : 'USD'),
-        time: raw.datetime || new Date().toISOString(),
-        source: 'live',
-        liveSource: raw.source || (market === 'hk' ? 'itick' : 'twelve'),
-        fetchedAt: Date.now()
-      };
+      var result;
+      if (market === 'hk') {
+        result = await fetchFutuHKQuotes([{ market: market, symbol: symbol }]);
+      } else {
+        // 保留現有美股／美指即時行情流程
+        var res = await fetch('/api/market', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          cache: 'no-store',
+          body: JSON.stringify({ action: 'live_quote', item: { market: market, symbol: symbol } })
+        });
+        var payload = await res.json();
+        if (!res.ok) throw new Error(payload.error || '即時查詢失敗');
+        var raw = payload.quote;
+        if (!raw || raw.close == null) throw new Error('無報價資料');
+        var prevQ = quotes[key] || {};
+        result = {};
+        result[key] = {
+          key: key,
+          market: market,
+          symbol: symbol,
+          name: lookupName(market, symbol, raw.name || prevQ.name || symbol),
+          price: num(raw.close),
+          prevClose: num(raw.previous_close),
+          open: num(raw.open),
+          high: num(raw.high),
+          low: num(raw.low),
+          volume: num(raw.volume) || 0,
+          change: num(raw.change),
+          changePct: num(raw.percent_change),
+          currency: raw.currency || 'USD',
+          time: raw.datetime || new Date().toISOString(),
+          source: 'live',
+          liveSource: raw.source || 'twelve',
+          fetchedAt: Date.now()
+        };
+      }
+
+      if (!result[key]) throw new Error('無報價資料');
+
+      quotes[key] = result[key];
       if (quotes[key].change == null && quotes[key].price != null && quotes[key].prevClose != null) {
         quotes[key].change = quotes[key].price - quotes[key].prevClose;
       }
@@ -1742,7 +1871,8 @@
       if (currentPage === 'markets') renderMarkets(false);
       if (selectedKey === key) updateModalPrices();
       markUpdatedAt();
-      var srcLabel = market === 'hk' ? 'iTick' : 'Twelve Data';
+
+      var srcLabel = market === 'hk' ? '富途官方 REST' : 'Twelve Data';
       showToast('已更新即時報價（' + srcLabel + '）', 1800, 'success');
       return quotes[key];
     } catch (err) {
@@ -1754,6 +1884,75 @@
         btn.classList.remove('busy');
       }
     }
+  }
+
+  function renderFutuSettings() {
+    var el = document.getElementById('futu-panel');
+    if (!el) return;
+
+    var token = getFutuAccessToken();
+    el.innerHTML =
+      '<div class="auth-form">' +
+        '<input type="password" id="futu-token" placeholder="貼上富途 OpenAPI Access Token" autocomplete="off" value="' +
+          escapeHtml(token) + '" />' +
+        '<div class="auth-row">' +
+          '<button class="pill primary" id="btn-futu-save">儲存</button>' +
+          '<button class="pill" id="btn-futu-test">測試行情</button>' +
+          '<button class="pill ghost" id="btn-futu-clear">清除</button>' +
+        '</div>' +
+        '<div id="futu-status" style="font-size:12px;color:var(--text-tertiary);line-height:1.45;margin-top:2px">' +
+          (token ? '已設定富途 Access Token（只儲存在此裝置）' : '尚未設定。港股「更新即時報價」會使用富途官方 REST。') +
+        '</div>' +
+      '</div>';
+
+    var input = document.getElementById('futu-token');
+    var status = document.getElementById('futu-status');
+
+    document.getElementById('btn-futu-save').onclick = function () {
+      setFutuAccessToken(input.value);
+      input.value = getFutuAccessToken();
+      status.textContent = getFutuAccessToken()
+        ? '已儲存（只儲存在此裝置）'
+        : '已清除';
+      showToast(getFutuAccessToken() ? '富途行情設定已儲存' : '富途行情設定已清除', 1800, 'success');
+    };
+
+    document.getElementById('btn-futu-clear').onclick = function () {
+      setFutuAccessToken('');
+      input.value = '';
+      status.textContent = '已清除富途 Access Token';
+      showToast('已清除富途行情設定', 1800, 'success');
+    };
+
+    document.getElementById('btn-futu-test').onclick = async function () {
+      var tokenBefore = getFutuAccessToken();
+      var candidate = String(input.value || '').trim();
+      if (candidate !== tokenBefore) setFutuAccessToken(candidate);
+      if (!getFutuAccessToken()) {
+        status.textContent = '請先輸入 Access Token';
+        showToast('請先輸入富途 Access Token', 2200, 'warn');
+        return;
+      }
+
+      var btn = document.getElementById('btn-futu-test');
+      btn.disabled = true;
+      btn.classList.add('busy');
+      status.textContent = '正在測試富途港股行情…';
+      try {
+        var test = await fetchFutuHKQuotes([{ market: 'hk', symbol: '00700' }]);
+        var q = test[makeKey('hk', '00700')];
+        status.textContent = q
+          ? ('連線成功 · 騰訊控股 ' + formatPrice(q.price, 'hk', '00700') + ' · ' + (q.time || ''))
+          : '連線成功，但未返回測試股票';
+        showToast('富途官方 REST 行情測試成功', 1800, 'success');
+      } catch (e) {
+        status.textContent = e.message || '測試失敗';
+        showToast(e.message || '富途行情測試失敗', 3200, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.classList.remove('busy');
+      }
+    };
   }
 
   function openDetail(key, forceRebuild) {
@@ -1786,7 +1985,7 @@
       '<div class="stock-change ' + ch.cls + '" data-field="change" style="margin-top:6px;display:inline-flex">' + ch.text + '</div>' +
       '<div style="margin-top:4px;font-size:11px;color:var(--text-tertiary)" data-field="src-note">' +
         (q.source === 'live'
-          ? ('即時報價 · ' + (q.liveSource === 'itick' || q.market === 'hk' ? 'iTick' : 'Twelve Data') + '（約 2 分鐘內不會被列表覆蓋）')
+          ? ('即時報價 · ' + (q.liveSource === 'futu' || q.market === 'hk' ? '富途官方 REST' : 'Twelve Data') + '（約 2 分鐘內不會被列表覆蓋）')
           : (q.market === 'hk' ? '列表：騰訊財經 · 可按「更新即時報價」' : '列表：騰訊財經 · 可按「更新即時報價」')) +
       '</div>' +
       '<div class="detail-grid">' +
@@ -1895,7 +2094,7 @@
     }
     if (page === 'markets') { renderMarkets(true); refresh(); }
     if (page === 'news') loadNews();
-    if (page === 'settings') { renderAuthPanel(); renderAlertSettings(); }
+    if (page === 'settings') { renderAuthPanel(); renderFutuSettings(); renderAlertSettings(); }
     var refreshBtn = document.getElementById('btn-refresh');
     if (refreshBtn) {
       refreshBtn.setAttribute('aria-label', page === 'news' ? '更新新聞' : '重新整理');
