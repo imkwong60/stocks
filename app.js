@@ -1695,120 +1695,248 @@
   }
 
   // 富途官方 OpenAPI REST（HK 即時報價）
-  // OAuth access token 只保存在本機 localStorage；不放入程式碼／Supabase。
+  // OAuth 2.1 + PKCE：設定頁「連接富途」後自動取得／刷新 Access Token。
+  // Token 只保存在本機，不寫入 Supabase；前端不保存 client secret。
   var FUTU_API_BASE = 'https://webapi.futunn.com';
-  var FUTU_TOKEN_KEY = 'futu_openapi_access_token_v1';
-  var FUTU_TOKEN_DRAFT_KEY = 'futu_openapi_access_token_draft_v1';
+  var FUTU_TOKEN_KEY = 'futu_oauth_token_v2';
+  var FUTU_CLIENT_KEY = 'futu_oauth_client_id_v2';
+  var FUTU_OAUTH_STATE_KEY = 'futu_oauth_state_v2';
+  var FUTU_OAUTH_VERIFIER_KEY = 'futu_oauth_verifier_v2';
+  var FUTU_OAUTH_REDIRECT_KEY = 'futu_oauth_redirect_v2';
 
-  function getFutuAccessToken() {
-    return String(lsGet(FUTU_TOKEN_KEY, '') || '').trim();
+  function getFutuTokenRecord() {
+    try { return JSON.parse(lsGet(FUTU_TOKEN_KEY, '{}') || '{}'); } catch (e) { return {}; }
   }
 
-  function setFutuAccessToken(token) {
-    token = String(token || '').trim();
-    if (token) lsSet(FUTU_TOKEN_KEY, token);
+  function setFutuTokenRecord(record) {
+    if (record && record.access_token) lsSet(FUTU_TOKEN_KEY, JSON.stringify(record));
     else lsDel(FUTU_TOKEN_KEY);
   }
 
-  function normalizeFutuHKSymbol(symbol) {
-    var sym = String(symbol || '').toUpperCase().trim();
-    if (!sym) return '';
-    if (sym === 'HSI') return 'HK.HSI';
-    var digits = sym.replace(/\D/g, '');
-    if (!digits) return '';
-    return 'HK.' + digits.padStart(5, '0');
+  function getFutuAccessToken() {
+    return String(getFutuTokenRecord().access_token || '').trim();
+  }
+
+  function getFutuClientId() {
+    return String(lsGet(FUTU_CLIENT_KEY, '') || '').trim();
+  }
+
+  function setFutuClientId(id) {
+    id = String(id || '').trim();
+    if (id) lsSet(FUTU_CLIENT_KEY, id); else lsDel(FUTU_CLIENT_KEY);
+  }
+
+  function futuRedirectUri() {
+    var url = new URL(window.location.href);
+    url.search = '';
+    url.hash = '';
+    return url.href;
+  }
+
+  function randomBase64Url(bytes) {
+    var arr = new Uint8Array(bytes);
+    crypto.getRandomValues(arr);
+    var bin = '';
+    for (var i = 0; i < arr.length; i++) bin += String.fromCharCode(arr[i]);
+    return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  }
+
+  async function makePkcePair() {
+    var verifier = randomBase64Url(48);
+    var digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+    var bin = '';
+    var bytes = new Uint8Array(digest);
+    for (var i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+    var challenge = btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+    return { verifier: verifier, challenge: challenge };
+  }
+
+  function clearFutuOAuthSession() {
+    try {
+      sessionStorage.removeItem(FUTU_OAUTH_STATE_KEY);
+      sessionStorage.removeItem(FUTU_OAUTH_VERIFIER_KEY);
+      sessionStorage.removeItem(FUTU_OAUTH_REDIRECT_KEY);
+    } catch (e) {}
   }
 
   function futuQuoteError(payload, status) {
-    var msg = payload && (payload.ret_msg || payload.message || payload.error);
+    var msg = payload && (payload.ret_msg || payload.message || payload.error || payload.error_description);
     if (msg) return String(msg);
-    if (status === 401) return '富途登入已失效，請在設定重新輸入 Access Token';
+    if (status === 401) return '富途登入已失效，請在設定重新連接富途';
     if (status === 403) return '富途帳戶沒有可用的港股行情權限';
     if (status === 429) return '富途 API 請求過於頻繁，請稍後再試';
     return '富途即時行情查詢失敗（HTTP ' + status + '）';
   }
 
-  async function fetchFutuHKQuotes(items) {
-    var token = getFutuAccessToken();
-    if (!token) {
-      throw new Error('尚未設定富途 Access Token；請到「設定」→「富途官方行情」輸入');
-    }
+  async function registerFutuOAuthClient() {
+    var existing = getFutuClientId();
+    if (existing) return existing;
 
+    var redirectUri = futuRedirectUri();
+    var res = await fetch(FUTU_API_BASE + '/oauth2/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        redirect_uris: [redirectUri],
+        token_endpoint_auth_method: 'none',
+        grant_types: ['authorization_code', 'refresh_token'],
+        response_types: ['code'],
+        client_name: '股票本本'
+      })
+    });
+    var payload = null;
+    try { payload = await res.json(); } catch (e) {}
+    if (!res.ok || !payload || !payload.client_id) {
+      throw new Error((payload && (payload.error_description || payload.error || payload.message)) || '無法註冊富途 OAuth Client');
+    }
+    setFutuClientId(payload.client_id);
+    return payload.client_id;
+  }
+
+  async function startFutuOAuth() {
+    if (!window.crypto || !crypto.subtle || !window.TextEncoder) {
+      throw new Error('此瀏覽器不支援 OAuth PKCE，請更新瀏覽器');
+    }
+    var clientId = await registerFutuOAuthClient();
+    var pkce = await makePkcePair();
+    var state = randomBase64Url(32);
+    var redirectUri = futuRedirectUri();
+    sessionStorage.setItem(FUTU_OAUTH_STATE_KEY, state);
+    sessionStorage.setItem(FUTU_OAUTH_VERIFIER_KEY, pkce.verifier);
+    sessionStorage.setItem(FUTU_OAUTH_REDIRECT_KEY, redirectUri);
+
+    var params = new URLSearchParams({
+      client_id: clientId,
+      code_challenge: pkce.challenge,
+      code_challenge_method: 'S256',
+      redirect_uri: redirectUri,
+      response_type: 'code',
+      state: state
+    });
+    window.location.assign(FUTU_API_BASE + '/oauth2/authorize/confirm?' + params.toString());
+  }
+
+  async function exchangeFutuAuthorizationCode(code, state) {
+    var savedState = sessionStorage.getItem(FUTU_OAUTH_STATE_KEY) || '';
+    var verifier = sessionStorage.getItem(FUTU_OAUTH_VERIFIER_KEY) || '';
+    var redirectUri = sessionStorage.getItem(FUTU_OAUTH_REDIRECT_KEY) || futuRedirectUri();
+    if (!savedState || state !== savedState) throw new Error('富途 OAuth 狀態驗證失敗，請重新連接');
+    if (!verifier) throw new Error('找不到 OAuth PKCE verifier，請重新連接');
+
+    var body = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code: code,
+      client_id: getFutuClientId(),
+      redirect_uri: redirectUri,
+      code_verifier: verifier
+    });
+    var res = await fetch(FUTU_API_BASE + '/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString()
+    });
+    var payload = null;
+    try { payload = await res.json(); } catch (e) {}
+    if (!res.ok || !payload || !payload.access_token) {
+      throw new Error((payload && (payload.error_description || payload.error || payload.message)) || '富途授權失敗');
+    }
+    setFutuTokenRecord({
+      access_token: payload.access_token,
+      refresh_token: payload.refresh_token || '',
+      expires_at: Date.now() + Number(payload.expires_in || 7200) * 1000,
+      scope: payload.scope || ''
+    });
+    clearFutuOAuthSession();
+    history.replaceState(null, '', redirectUri);
+    return payload;
+  }
+
+  async function refreshFutuAccessToken() {
+    var record = getFutuTokenRecord();
+    if (!record.refresh_token || !getFutuClientId()) throw new Error('富途登入已失效，請重新連接富途');
+    var body = new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: record.refresh_token,
+      client_id: getFutuClientId()
+    });
+    var res = await fetch(FUTU_API_BASE + '/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: body.toString()
+    });
+    var payload = null;
+    try { payload = await res.json(); } catch (e) {}
+    if (!res.ok || !payload || !payload.access_token) {
+      setFutuTokenRecord({});
+      throw new Error((payload && (payload.error_description || payload.error || payload.message)) || '富途登入已失效，請重新連接');
+    }
+    setFutuTokenRecord({
+      access_token: payload.access_token,
+      refresh_token: payload.refresh_token || record.refresh_token,
+      expires_at: Date.now() + Number(payload.expires_in || 7200) * 1000,
+      scope: payload.scope || record.scope || ''
+    });
+    return payload.access_token;
+  }
+
+  async function getValidFutuAccessToken() {
+    var record = getFutuTokenRecord();
+    if (!record.access_token) throw new Error('尚未連接富途；請到「設定」→「富途官方行情」按「連接富途」');
+    if (!record.expires_at || Number(record.expires_at) - Date.now() < 120000) {
+      return refreshFutuAccessToken();
+    }
+    return record.access_token;
+  }
+
+  async function fetchFutuHKQuotes(items) {
+    var token = await getValidFutuAccessToken();
     var codes = items.map(function (item) {
       return normalizeFutuHKSymbol(item.symbol);
     }).filter(Boolean);
-
     if (!codes.length) throw new Error('沒有有效的港股代碼');
 
-    var res = await fetch(FUTU_API_BASE + '/api/v1.0/quote/stock-quote', {
-      method: 'POST',
-      cache: 'no-store',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + token
-      },
-      body: JSON.stringify({ code_list: codes })
-    });
-
-    var payload = null;
-    try { payload = await res.json(); } catch (e) {}
-
-    if (!res.ok) throw new Error(futuQuoteError(payload, res.status));
-    if (!payload || payload.ret_code !== 0) {
-      throw new Error(futuQuoteError(payload, res.status || 200));
+    async function request(accessToken) {
+      var res = await fetch(FUTU_API_BASE + '/api/v1.0/quote/stock-quote', {
+        method: 'POST', cache: 'no-store',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + accessToken },
+        body: JSON.stringify({ code_list: codes })
+      });
+      var payload = null;
+      try { payload = await res.json(); } catch (e) {}
+      return { res: res, payload: payload };
     }
 
-    var list = payload.data && Array.isArray(payload.data.quote_list)
-      ? payload.data.quote_list : [];
-    var result = {};
+    var response = await request(token);
+    if (response.res.status === 401) {
+      token = await refreshFutuAccessToken();
+      response = await request(token);
+    }
+    var res = response.res, payload = response.payload;
+    if (!res.ok) throw new Error(futuQuoteError(payload, res.status));
+    if (!payload || payload.ret_code !== 0) throw new Error(futuQuoteError(payload, res.status || 200));
 
+    var list = payload.data && Array.isArray(payload.data.quote_list) ? payload.data.quote_list : [];
+    var result = {};
     list.forEach(function (raw) {
       var code = String(raw.code || '').toUpperCase();
       var symbol = code.indexOf('HK.') === 0 ? code.slice(3) : '';
       if (!symbol) return;
-
-      var item = items.find(function (x) {
-        return normalizeFutuHKSymbol(x.symbol) === code;
-      });
+      var item = items.find(function (x) { return normalizeFutuHKSymbol(x.symbol) === code; });
       if (!item) return;
-
-      var prev = num(raw.prev_close_price);
-      var price = num(raw.last_price);
+      var prev = num(raw.prev_close_price), price = num(raw.last_price);
       var change = price != null && prev != null ? price - prev : null;
       var pct = change != null && prev ? change / prev * 100 : null;
-      var tcName = raw.tc_name || raw.name || raw.sc_name || symbol;
       var dataTime = num(raw.data_time);
-      var timeText = dataTime != null
-        ? new Date(dataTime).toLocaleString('zh-HK', {
-            timeZone: 'Asia/Hong_Kong',
-            hour12: false
-          })
-        : '';
-
+      var timeText = dataTime != null ? new Date(dataTime).toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong', hour12: false }) : '';
       result[makeKey('hk', symbol)] = {
-        key: makeKey('hk', symbol),
-        market: 'hk',
-        symbol: symbol,
-        name: lookupName('hk', symbol, tcName),
-        price: price,
-        prevClose: prev,
-        open: num(raw.open_price),
-        high: num(raw.high_price),
-        low: num(raw.low_price),
-        volume: num(raw.volume) || 0,
-        change: change,
-        changePct: pct,
-        currency: 'HKD',
-        time: timeText || raw.data_date || '',
-        source: 'live',
-        liveSource: 'futu',
-        fetchedAt: Date.now()
+        key: makeKey('hk', symbol), market: 'hk', symbol: symbol,
+        name: lookupName('hk', symbol, raw.tc_name || raw.name || raw.sc_name || symbol),
+        price: price, prevClose: prev, open: num(raw.open_price), high: num(raw.high_price), low: num(raw.low_price),
+        volume: num(raw.volume) || 0, change: change, changePct: pct, currency: 'HKD', time: timeText || raw.data_date || '',
+        source: 'live', liveSource: 'futu', fetchedAt: Date.now()
       };
     });
-
-    if (!Object.keys(result).length) {
-      throw new Error('富途沒有返回有效港股行情（請檢查代碼及行情權限）');
-    }
+    if (!Object.keys(result).length) throw new Error('富途沒有返回有效港股行情（請檢查代碼及行情權限）');
     return result;
   }
 
@@ -1886,72 +2014,80 @@
     }
   }
 
+  async function handleFutuOAuthCallback() {
+    var url = new URL(window.location.href);
+    var code = url.searchParams.get('code');
+    var state = url.searchParams.get('state');
+    var error = url.searchParams.get('error');
+    if (!code && !error) return false;
+    if (error) {
+      clearFutuOAuthSession();
+      history.replaceState(null, '', futuRedirectUri());
+      showToast('富途授權取消或失敗：' + (url.searchParams.get('error_description') || error), 3200, 'error');
+      return true;
+    }
+    try {
+      await exchangeFutuAuthorizationCode(code, state || '');
+      history.replaceState(null, '', futuRedirectUri());
+      showToast('富途連接成功', 2200, 'success');
+    } catch (e) {
+      clearFutuOAuthSession();
+      history.replaceState(null, '', futuRedirectUri());
+      showToast(e.message || '富途授權失敗', 3500, 'error');
+    }
+    return true;
+  }
+
   function renderFutuSettings() {
     var el = document.getElementById('futu-panel');
     if (!el) return;
-
-    var token = getFutuAccessToken();
+    var record = getFutuTokenRecord();
+    var connected = !!record.access_token;
+    var scope = record.scope || '';
     el.innerHTML =
       '<div class="auth-form">' +
-        '<input type="password" id="futu-token" placeholder="貼上富途 OpenAPI Access Token" autocomplete="off" value="' +
-          escapeHtml(token) + '" />' +
-        '<div class="auth-row">' +
-          '<button class="pill primary" id="btn-futu-save">儲存</button>' +
-          '<button class="pill" id="btn-futu-test">測試行情</button>' +
-          '<button class="pill ghost" id="btn-futu-clear">清除</button>' +
+        '<div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px">' +
+          '<div style="font-size:14px;font-weight:600">' + (connected ? '● 已連接富途' : '○ 尚未連接富途') + '</div>' +
+          '<div style="font-size:12px;color:var(--text-tertiary)">' + (connected ? 'OAuth 2.1 + PKCE' : '首次連接會開啟富途登入') + '</div>' +
         '</div>' +
-        '<div id="futu-status" style="font-size:12px;color:var(--text-tertiary);line-height:1.45;margin-top:2px">' +
-          (token ? '已設定富途 Access Token（只儲存在此裝置）' : '尚未設定。港股「更新即時報價」會使用富途官方 REST。') +
+        '<div class="auth-row">' +
+          '<button class="pill primary" id="btn-futu-connect">' + (connected ? '重新授權' : '連接富途') + '</button>' +
+          (connected ? '<button class="pill ghost" id="btn-futu-disconnect">解除連接</button>' : '') +
+          '<button class="pill" id="btn-futu-test">測試行情</button>' +
+        '</div>' +
+        '<div id="futu-status" style="font-size:12px;color:var(--text-tertiary);line-height:1.5;margin-top:8px">' +
+          (connected ? ('已授權行情讀取。' + (scope ? ' 權限：' + escapeHtml(scope) : '') + ' Token 會在到期前自動刷新。') : '只需要授權行情讀取（quote:read），不會要求輸入富途密碼。') +
         '</div>' +
       '</div>';
 
-    var input = document.getElementById('futu-token');
+    var connectBtn = document.getElementById('btn-futu-connect');
     var status = document.getElementById('futu-status');
-
-    document.getElementById('btn-futu-save').onclick = function () {
-      setFutuAccessToken(input.value);
-      input.value = getFutuAccessToken();
-      status.textContent = getFutuAccessToken()
-        ? '已儲存（只儲存在此裝置）'
-        : '已清除';
-      showToast(getFutuAccessToken() ? '富途行情設定已儲存' : '富途行情設定已清除', 1800, 'success');
+    connectBtn.onclick = async function () {
+      connectBtn.disabled = true; connectBtn.classList.add('busy'); status.textContent = '正在準備富途授權…';
+      try { await startFutuOAuth(); } catch (e) {
+        status.textContent = e.message || '無法開始富途授權';
+        showToast(e.message || '無法開始富途授權', 3200, 'error');
+        connectBtn.disabled = false; connectBtn.classList.remove('busy');
+      }
     };
 
-    document.getElementById('btn-futu-clear').onclick = function () {
-      setFutuAccessToken('');
-      input.value = '';
-      status.textContent = '已清除富途 Access Token';
-      showToast('已清除富途行情設定', 1800, 'success');
+    var disconnectBtn = document.getElementById('btn-futu-disconnect');
+    if (disconnectBtn) disconnectBtn.onclick = function () {
+      setFutuTokenRecord({});
+      showToast('已解除富途連接', 1800, 'success');
+      renderFutuSettings();
     };
 
     document.getElementById('btn-futu-test').onclick = async function () {
-      var tokenBefore = getFutuAccessToken();
-      var candidate = String(input.value || '').trim();
-      if (candidate !== tokenBefore) setFutuAccessToken(candidate);
-      if (!getFutuAccessToken()) {
-        status.textContent = '請先輸入 Access Token';
-        showToast('請先輸入富途 Access Token', 2200, 'warn');
-        return;
-      }
-
-      var btn = document.getElementById('btn-futu-test');
-      btn.disabled = true;
-      btn.classList.add('busy');
-      status.textContent = '正在測試富途港股行情…';
+      var btn = this; btn.disabled = true; btn.classList.add('busy'); status.textContent = '正在測試富途港股行情…';
       try {
         var test = await fetchFutuHKQuotes([{ market: 'hk', symbol: '00700' }]);
         var q = test[makeKey('hk', '00700')];
-        status.textContent = q
-          ? ('連線成功 · 騰訊控股 ' + formatPrice(q.price, 'hk', '00700') + ' · ' + (q.time || ''))
-          : '連線成功，但未返回測試股票';
+        status.textContent = q ? ('連線成功 · 騰訊控股 ' + formatPrice(q.price, 'hk', '00700') + ' · ' + (q.time || '')) : '連線成功，但未返回測試股票';
         showToast('富途官方 REST 行情測試成功', 1800, 'success');
       } catch (e) {
-        status.textContent = e.message || '測試失敗';
-        showToast(e.message || '富途行情測試失敗', 3200, 'error');
-      } finally {
-        btn.disabled = false;
-        btn.classList.remove('busy');
-      }
+        status.textContent = e.message || '測試失敗'; showToast(e.message || '富途行情測試失敗', 3200, 'error');
+      } finally { btn.disabled = false; btn.classList.remove('busy'); }
     };
   }
 
@@ -2763,6 +2899,7 @@
     setStatus('offline', '目前離線 · 顯示快取行情');
   });
 
+  handleFutuOAuthCallback();
   loadWatchlist();
   renderPresets();
   renderWatchlist(true);
