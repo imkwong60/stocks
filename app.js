@@ -1748,10 +1748,15 @@
 
   function clearFutuOAuthSession() {
     try {
+      localStorage.removeItem(FUTU_OAUTH_STATE_KEY);
+      localStorage.removeItem(FUTU_OAUTH_VERIFIER_KEY);
+      localStorage.removeItem(FUTU_OAUTH_REDIRECT_KEY);
+    } catch (e) {}
+    try {
       sessionStorage.removeItem(FUTU_OAUTH_STATE_KEY);
       sessionStorage.removeItem(FUTU_OAUTH_VERIFIER_KEY);
       sessionStorage.removeItem(FUTU_OAUTH_REDIRECT_KEY);
-    } catch (e) {}
+    } catch (e2) {}
   }
 
   function futuQuoteError(payload, status) {
@@ -1771,9 +1776,12 @@
     var pkce = await makePkcePair();
     var state = randomBase64Url(32);
     var redirectUri = futuRedirectUri();
-    sessionStorage.setItem(FUTU_OAUTH_STATE_KEY, state);
-    sessionStorage.setItem(FUTU_OAUTH_VERIFIER_KEY, pkce.verifier);
-    sessionStorage.setItem(FUTU_OAUTH_REDIRECT_KEY, redirectUri);
+    // GitHub Pages / mobile browsers can restore the callback in a new
+    // browsing context. Keep the short-lived PKCE session in localStorage
+    // so the callback can reliably recover it.
+    localStorage.setItem(FUTU_OAUTH_STATE_KEY, state);
+    localStorage.setItem(FUTU_OAUTH_VERIFIER_KEY, pkce.verifier);
+    localStorage.setItem(FUTU_OAUTH_REDIRECT_KEY, redirectUri);
 
     var params = new URLSearchParams({
       client_id: clientId,
@@ -1788,10 +1796,11 @@
   }
 
   async function exchangeFutuAuthorizationCode(code, state) {
-    var savedState = sessionStorage.getItem(FUTU_OAUTH_STATE_KEY) || '';
-    var verifier = sessionStorage.getItem(FUTU_OAUTH_VERIFIER_KEY) || '';
-    var redirectUri = sessionStorage.getItem(FUTU_OAUTH_REDIRECT_KEY) || futuRedirectUri();
-    if (!savedState || state !== savedState) throw new Error('富途 OAuth 狀態驗證失敗，請重新連接');
+    var savedState = localStorage.getItem(FUTU_OAUTH_STATE_KEY) || sessionStorage.getItem(FUTU_OAUTH_STATE_KEY) || '';
+    var verifier = localStorage.getItem(FUTU_OAUTH_VERIFIER_KEY) || sessionStorage.getItem(FUTU_OAUTH_VERIFIER_KEY) || '';
+    var redirectUri = localStorage.getItem(FUTU_OAUTH_REDIRECT_KEY) || sessionStorage.getItem(FUTU_OAUTH_REDIRECT_KEY) || futuRedirectUri();
+    if (!savedState) throw new Error('找不到富途 OAuth 授權狀態，請重新按「連接富途」');
+    if (state !== savedState) throw new Error('富途 OAuth 狀態驗證失敗，請重新連接');
     if (!verifier) throw new Error('找不到 OAuth PKCE verifier，請重新連接');
 
     var body = new URLSearchParams({
