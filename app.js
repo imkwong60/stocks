@@ -1702,7 +1702,7 @@
   var FUTU_CLIENT_ID = '3255246d-831b-4add-93b6-39aefd8ec3f1';
   var FUTU_REDIRECT_URI = 'https://imkwong60.github.io/stocks/';
   // ★ 部署後請把 YOUR-PROJECT 改成你的 Vercel 網域（只需改這一行），並同步在 index.html 的 CSP connect-src 加入同一網域。
-  var VERCEL_BASE = 'https://stocks-tau-roan.vercel.app/';
+  var VERCEL_BASE = 'https://stocks-tau-roan.vercel.app';
   // 富途 token／報價接口不支援瀏覽器 CORS，改經自己的 Vercel 代轉（api/futu-proxy.js）。
   var FUTU_PROXY = VERCEL_BASE + '/api/futu-proxy';
   function futuProxyUrl(kind) {
