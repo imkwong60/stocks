@@ -1,23 +1,16 @@
 /**
- * Vercel Cron / 手動：檢查自選漲跌幅 ≥ 5% 並 Web Push
- * 環境變數：
- *   VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT (mailto:...)
- *   SUPABASE_URL, SUPABASE_ANON_KEY（或沿用前端同一專案）
- *   CRON_SECRET（可選，Authorization: Bearer ...）
+ * GitHub Actions 版本：檢查自選漲跌幅 ≥ 5% 並 Web Push
+ * 需要環境變數：
+ *   VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT
+ *   SUPABASE_URL, SUPABASE_ANON_KEY
  */
 const webpush = require('web-push');
 
 const QT_URL = 'https://qt.gtimg.cn/q=';
 const SUPABASE_URL = process.env.SUPABASE_URL || 'https://wanknivxcsrasdkkxmfr.supabase.co';
-const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6IndhbmtuaXZ4Y3NyYXNka2t4bWZyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODczMzE4NjcsImV4cCI6MjEwMjkwNzg2N30.tqsFimERtYCxoh8J-8FlqxByWtX2gNnyaGo08jditrs';
+const SUPABASE_KEY = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 const REGISTRY_ID = 'quote_push_registry_v1';
 const ALERT_PCT = 5;
-
-function send(res, status, body) {
-  res.setHeader('Cache-Control', 'no-store');
-  res.status(status).json(body);
-}
 
 function toWire(item) {
   const sym = String(item.symbol || '').toUpperCase();
@@ -122,33 +115,22 @@ function configureVapid() {
   return true;
 }
 
-module.exports = async function handler(req, res) {
-  // Cron uses GET; allow POST for manual test
-  if (req.method !== 'GET' && req.method !== 'POST') {
-    return send(res, 405, { error: 'Method not allowed' });
-  }
-
-  const secret = process.env.CRON_SECRET;
-  if (secret) {
-    const auth = req.headers.authorization || '';
-    const hdr = req.headers['x-cron-secret'] || '';
-    if (auth !== 'Bearer ' + secret && hdr !== secret) {
-      // Vercel Cron sends special header on paid plans; allow vercel cron user-agent loosely if no secret match
-      const ua = req.headers['user-agent'] || '';
-      if (ua.indexOf('vercel-cron') === -1) {
-        return send(res, 401, { error: 'Unauthorized' });
-      }
-    }
-  }
-
+async function main() {
   if (!configureVapid()) {
-    return send(res, 200, { ok: false, reason: 'VAPID keys not configured' });
+    console.log(JSON.stringify({ ok: false, reason: 'VAPID keys not configured' }));
+    process.exit(0);
+  }
+
+  if (!SUPABASE_KEY) {
+    console.error('Missing SUPABASE_ANON_KEY');
+    process.exit(1);
   }
 
   const registry = (await sbGet(REGISTRY_ID)) || { devices: [] };
   const devices = Array.isArray(registry.devices) ? registry.devices : [];
   if (!devices.length) {
-    return send(res, 200, { ok: true, checked: 0, sent: 0 });
+    console.log(JSON.stringify({ ok: true, checked: 0, sent: 0 }));
+    return;
   }
 
   const day = utcDay();
@@ -166,6 +148,7 @@ module.exports = async function handler(req, res) {
     try {
       quotesMap = await fetchQuotes(items);
     } catch (e) {
+      console.warn('fetchQuotes failed', e.message);
       updatedDevices.push(device);
       continue;
     }
@@ -202,16 +185,17 @@ module.exports = async function handler(req, res) {
           JSON.stringify({
             title: '大幅波動 ≥' + ALERT_PCT + '%',
             body: body,
-            url: '/',
+            url: 'https://imkwong60.github.io/stocks/',
             tag: 'quote-move-' + day
           })
         );
         sent += 1;
       } catch (err) {
-        // gone subscription
+        // 訂閱已失效
         if (err && (err.statusCode === 404 || err.statusCode === 410)) {
-          continue; // drop device
+          continue; // 不加入 updatedDevices，等於刪除
         }
+        console.warn('push failed', err.statusCode || err.message);
       }
     }
 
@@ -219,5 +203,10 @@ module.exports = async function handler(req, res) {
   }
 
   await sbUpsert(REGISTRY_ID, { devices: updatedDevices });
-  return send(res, 200, { ok: true, checked, sent, devices: updatedDevices.length });
-};
+  console.log(JSON.stringify({ ok: true, checked, sent, devices: updatedDevices.length }));
+}
+
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
