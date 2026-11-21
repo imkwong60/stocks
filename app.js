@@ -13,7 +13,7 @@
   var ALERT_LOG_KEY = 'quote_alert_log_v1';
   var PUSH_REG_ID = 'quote_push_registry_v1';
   // 與 Vercel VAPID_PUBLIC_KEY 一致（私鑰只放伺服器）
-  var VAPID_PUBLIC_KEY = 'BDwJnz6kxYCrBCyJE47Zk_7SA-FTmyLWw5LVsvnPVdU12gyZDyUOnIoqss0Y_QClvrzYhvb1sMHzesJ8TOXAFqI';
+  var VAPID_PUBLIC_KEY = 'BNtUxRU1oQ_pfnfos06sCxB-wXRAXzd0NuNIm26mv7NQWpAbE8KwBTsBmRQowb1lE-aPVUQ6GiYzVb_F__u30Do';
 
   var MAX_BATCH_SIZE = 20; // 騰訊批量上限（一次刷新）
 
